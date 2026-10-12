@@ -128,3 +128,20 @@ def test_inferred_pairs_are_flagged_and_explicit_ones_are_not(case):
     case.append("change", "explicit change", {}, {"before": a, "after": b})
     pairs = {p["change"]: p["inferred"] for p in build_summary(case).before_after}
     assert pairs == {"inferred change": True, "explicit change": False}
+
+
+def test_a_partial_link_keeps_the_given_side_and_infers_the_other(case):
+    a = _capture(case, "ref_sag", "A")
+    b = _capture(case, "healthy", "B")
+    case.append("change", "swapped sensor", {}, {"before": a})
+    c = _capture(case, "ground_lift", "C")
+    pair = build_summary(case).before_after[0]
+    assert (pair["before"]["id"], pair["after"]["id"], pair["inferred"]) == (a, c, True) and b
+
+
+def test_attaching_a_capture_does_not_change_the_pairing(case):
+    a = _capture(case, "ref_sag", "A")
+    case.append("change", "swapped sensor", {}, {"capture": a})
+    c = _capture(case, "healthy", "C")
+    pair = build_summary(case).before_after[0]
+    assert (pair["before"]["id"], pair["after"]["id"]) == (a, c)

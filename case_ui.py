@@ -44,6 +44,14 @@ def _quick_add(case, capture_ids):
                              "change": "What did you change, and what happened?"}[kind], key=f"qa_text_{n}")
         if capture_ids and st.checkbox("Attach to a capture", key=f"qa_attach_{n}"):
             refs["capture"] = st.selectbox("Capture", capture_ids, key=f"qa_cap_{n}")
+        if kind == "change" and capture_ids:
+            labels = {c["id"]: f"{c['id']}: {c.get('label') or 'unlabeled'}" for c in case.session.list_captures()}
+            pick = ["infer from order"] + capture_ids
+            for side in ("before", "after"):
+                sel = st.selectbox(f"Capture {side} the change (optional)", pick, key=f"qa_{side}_{n}",
+                                   format_func=lambda i: labels.get(i, i))
+                if sel != pick[0]:
+                    refs[side] = sel
     elif kind == "code_read":
         raw = st.text_input("Codes, comma separated (e.g. P0335, P0016)", key=f"qa_codes_{n}")
         status = st.selectbox("Status", ["current", "pending", "history"], key=f"qa_cstatus_{n}")

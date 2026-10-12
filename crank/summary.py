@@ -124,14 +124,18 @@ def build_summary(case: Case) -> Summary:
         if e.type != "change":
             continue
         b, a = e.refs.get("before"), e.refs.get("after")
-        inferred = not (b in by_id and a in by_id)
-        if inferred:                                    # no explicit link: nearest captures either side
+        b_ok, a_ok = b in by_id, a in by_id               # a link the user gave is kept; only the gap is inferred
+        if not b_ok:
             before = [c for j, c in enumerate(events) if j < i and c.type == "capture"]
-            after = [c for j, c in enumerate(events) if j > i and c.type == "capture"]
-            if not before or not after:
+            if not before:
                 continue
-            b, a = before[-1].refs.get("capture"), after[0].refs.get("capture")
-        s.before_after.append(dict(change=e.text, before=by_id[b], after=by_id[a], inferred=inferred))
+            b = before[-1].refs.get("capture")
+        if not a_ok:
+            after = [c for j, c in enumerate(events) if j > i and c.type == "capture"]
+            if not after:
+                continue
+            a = after[0].refs.get("capture")
+        s.before_after.append(dict(change=e.text, before=by_id[b], after=by_id[a], inferred=not (b_ok and a_ok)))
 
     have_step = {e.refs.get("step") for e in events if e.refs.get("step")}
     for step in STEPS:
