@@ -168,7 +168,8 @@ class Case:
 
     def events(self) -> list[Event]:
         """Events from the log only (no legacy synthesis)."""
-        events, self.skipped = load_events(self._events_path)
+        with _lock:                                # never read between a writer's lead newline and its line
+            events, self.skipped = load_events(self._events_path)
         return events
 
     def append(self, type_: str, text: str = "", data: dict | None = None,

@@ -85,7 +85,8 @@ class Controller:
         snap = dict(mode=self.mode, scenario=self.scenario, session_name=self.session_name,
                     state=job.state if job else "idle", message=job.message if job else "",
                     running=self.running, seconds_left=job.seconds_left if job else 0.0,
-                    saved_id=job.saved_id if job else None, findings=[], warnings=[])
+                    saved_id=job.saved_id if job else None, hook_error=job.hook_error if job else "",
+                    findings=[], warnings=[])
         if job and job.analysis:
             snap["findings"] = [{"severity": f.severity, "title": f.title}
                                 for f in sorted(job.analysis.findings,

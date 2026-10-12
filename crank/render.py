@@ -13,6 +13,11 @@ def _v(x) -> str:
     return NOT_RECORDED if x in (None, "") else str(x)
 
 
+def _md(x) -> str:
+    """One line of Markdown-safe text: notes can be multi-line and `$` starts math in some viewers."""
+    return " ".join(str(x).split()).replace("$", "\\$")
+
+
 def _cap_head(c: dict) -> str:
     sim = " (SIMULATED)" if c["sim"] else ""
     return f"{c['id']} {c['label'] or 'unlabeled'}{sim}"
@@ -63,31 +68,32 @@ def to_markdown(s: Summary) -> str:
         return "\n".join(out + ["Nothing has been recorded for this case yet."]) + "\n"
     details = [("Engine", v.engine), ("Transmission", v.transmission), ("Mileage", v.mileage),
                ("Modifications", v.modifications)] + ([("VIN", v.vin)] if v.vin else [])
-    out += [f"- {k}: {_v(x)}" for k, x in details]
-    out += ["", "## Problem", v.problem or NOT_RECORDED]
+    out += [f"- {k}: {_md(_v(x))}" for k, x in details]
+    out += ["", "## Problem", _md(v.problem) or NOT_RECORDED]
     if s.symptoms:
-        out += ["", "## Symptoms"] + [f"- {x['text']}" for x in s.symptoms]
+        out += ["", "## Symptoms"] + [f"- {_md(x['text'])}" for x in s.symptoms]
     out += ["", "## Ruled out"]
-    out += ([f"- {r['title']}: {r['reason']}" + (f" (evidence: {', '.join(r['evidence'])})" if r["evidence"] else "")
+    out += ([f"- {_md(r['title'])}: {_md(r['reason'])}" + (f" (evidence: {', '.join(r['evidence'])})" if r["evidence"] else "")
              for r in s.ruled_out] or ["- nothing yet"])
-    out += ["", "## Still open"] + ([f"- {r['title']}" for r in s.open] or ["- nothing listed"])
+    out += ["", "## Still open"] + ([f"- {_md(r['title'])}" for r in s.open] or ["- nothing listed"])
     if s.confirmed:
-        out += ["", "## Confirmed"] + [f"- {r['title']}: {r['reason']}" for r in s.confirmed]
+        out += ["", "## Confirmed"] + [f"- {_md(r['title'])}: {_md(r['reason'])}" for r in s.confirmed]
     out += ["", "## Key data"]
     if s.codes:
-        out.append("- Codes: " + ", ".join(_code(c) for c in s.codes))
+        out.append("- Codes: " + _md(", ".join(_code(c) for c in s.codes)))
     if s.freeze_frame:
-        out.append("- " + _freeze(s.freeze_frame))
-    out += [f"- {_measure(m)}" for m in s.measurements]
-    out += [f"- Capture {_cap_line(c)}" for c in s.captures]
+        out.append("- " + _md(_freeze(s.freeze_frame)))
+    out += [f"- {_md(_measure(m))}" for m in s.measurements]
+    out += [f"- Capture {_md(_cap_line(c))}" for c in s.captures]
     if not (s.codes or s.measurements or s.captures):
         out.append(f"- {NOT_RECORDED}")
     if s.before_after:
         out += ["", "## Before and after"]
         for b in s.before_after:
-            out += [f"- After \"{b['change']}\"{' ' + INFERRED if b['inferred'] else ''}:", f"  - before: {_cap_line(b['before'])}", f"  - after: {_cap_line(b['after'])}"]
+            out += [f"- After \"{_md(b['change'])}\"{' ' + INFERRED if b['inferred'] else ''}:", f"  - before: {_md(_cap_line(b['before']))}", f"  - after: {_md(_cap_line(b['after']))}"]
     out += ["", "## Not yet tried"] + ([f"- {t}" for t in s.not_tried] or ["- all guided tests have data"])
-    out += ["", "## Timeline"] + [f"- {t['ts'][:16].replace('T', ' ') or 'undated'}: {t['line']}" for t in s.timeline]
+    out += ["", "## Timeline"] + ([f"- {t['ts'][:16].replace('T', ' ') or 'undated'}: {_md(t['line'])}"
+                                  for t in s.timeline] or ["- nothing recorded yet"])
     if s.attachments:
         out += ["", "## Attachments (in the case folder)"] + [f"- {a}" for a in s.attachments]
     if s.skipped_lines:
@@ -177,8 +183,8 @@ def to_html(s: Summary, plots: dict | None = None) -> str:
                         f"{_cap_html(b['before'], plots.get(b['before']['id'], ''))}"
                         f"{_cap_html(b['after'], plots.get(b['after']['id'], ''))}</div>")
         body.append("<h2>Not yet tried</h2>" + (_li(e(t) for t in s.not_tried) or "<p class='muted'>all guided tests have data</p>"))
-        body.append("<h2>Timeline</h2>" + _li(f"<span class='muted'>{e(t['ts'][:16].replace('T', ' ') or 'undated')}</span> "
-                    f"{e(t['line'])}" for t in s.timeline))
+        body.append("<h2>Timeline</h2>" + (_li([f"<span class='muted'>{e(t['ts'][:16].replace('T', ' ') or 'undated')}</span> "
+                    f"{e(t['line'])}" for t in s.timeline]) or "<p class='muted'>nothing recorded yet</p>"))
         if s.skipped_lines:
             body.append(f"<p class='muted'>{s.skipped_lines} damaged log line(s) were skipped.</p>")
     body.append("<p class='muted'>The verdicts are measurements and rule-based findings from a diagnostic tool, not a diagnosis.</p>")
