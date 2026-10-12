@@ -238,3 +238,32 @@ def test_legacy_readings_left_unset_are_not_synthesized(tmp_path):
     ses = SessionStore(tmp_path).open("old")
     ses.set_reading("static", {"battery_v": 12.6, "gnd_batt_block_ohm": None})
     assert [e.data["name"] for e in Case(ses).all_events()] == ["Battery voltage"]
+
+
+def test_event_ids_continue_past_e9999(tmp_path):
+    from crank.case import Case
+    from crank.store import SessionStore
+    case = Case(SessionStore(tmp_path).open("big"))
+    (case.path / "events.jsonl").write_text(
+        '{"id":"e9999","ts":"2026-01-01T00:00:00","type":"observation","text":"x"}\n')
+    assert case.append("observation", "y").id == "e10000"
+    assert case.append("observation", "z").id == "e10001"
+    assert [e.id for e in case.events()][-2:] == ["e10000", "e10001"]
+
+
+def test_reading_never_sees_a_half_written_line(tmp_path):
+    import threading
+    from crank.case import Case
+    from crank.store import SessionStore
+    case = Case(SessionStore(tmp_path).open("race"))
+    stop = threading.Event()
+
+    def writer():
+        for _ in range(200):
+            case.append("observation", "x" * 2000)
+        stop.set()
+    t = threading.Thread(target=writer); t.start()
+    while not stop.is_set():
+        case.events()
+        assert case.skipped == 0
+    t.join()

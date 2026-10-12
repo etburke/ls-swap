@@ -198,11 +198,11 @@ def test_hypothesis_needs_a_reason_to_be_ruled_out_then_moves(at):
     h = _case().set_hypothesis(None, "Bad PCM")
     at.run()
     hid = h.data["hid"]
-    at.selectbox(key=f"hs_default_{hid}").select("ruled_out").run()
-    at.button(key=f"hu_default_{hid}").click().run()
+    at.selectbox(key=f"hs_default_{hid}_{h.id}").select("ruled_out").run()
+    at.button(key=f"hu_default_{hid}_{h.id}").click().run()
     assert any("needs a reason" in e.value for e in at.error)
-    at.text_input(key=f"hr_default_{hid}").set_value("second PCM behaved the same").run()
-    at.button(key=f"hu_default_{hid}").click().run()
+    at.text_input(key=f"hr_default_{hid}_{h.id}").set_value("second PCM behaved the same").run()
+    at.button(key=f"hu_default_{hid}_{h.id}").click().run()
     assert _case().hypotheses()[hid].data["status"] == "ruled_out"
 
 
@@ -321,3 +321,12 @@ def test_phone_remote_obd_button(at):
     at.button(key="remote_obd").click().run()
     assert not at.exception
     assert any("Codes (simulated)" in m.value for m in at.markdown)
+
+
+def test_logging_the_verdict_twice_adds_one_observation(at):
+    _arm_and_finish(at)
+    _go(at, "Results")
+    at.button(key="log_verdict").click().run()
+    at.button(key="log_verdict").click().run()
+    obs = [e for e in _case().events() if e.type == "observation" and "verdict" in e.text]
+    assert len(obs) == 1 and any("already" in i.value for i in at.info)

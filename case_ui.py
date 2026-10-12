@@ -108,9 +108,9 @@ def _board(case, last_codes):
                 if e.data.get("reason"):
                     st.caption(e.data["reason"])
                 new = st.selectbox("Move to", HYPOTHESIS_STATUSES, index=HYPOTHESIS_STATUSES.index(status),
-                                   key=f"hs_{case.name}_{hid}")
-                reason = st.text_input("Reason", key=f"hr_{case.name}_{hid}")
-                if st.button("Update", key=f"hu_{case.name}_{hid}"):
+                                   key=f"hs_{case.name}_{hid}_{e.id}")
+                reason = st.text_input("Reason", key=f"hr_{case.name}_{hid}_{e.id}")
+                if st.button("Update", key=f"hu_{case.name}_{hid}_{e.id}"):
                     try:
                         case.set_hypothesis(hid, e.data["title"], new, reason, e.refs)
                         st.rerun()

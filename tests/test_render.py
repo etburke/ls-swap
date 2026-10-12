@@ -95,3 +95,20 @@ def test_code_status_and_inferred_pairs_are_shown(tmp_path):
         case.append("capture", lab, {"sim": False, "snapshot": None}, {"capture": lab})
     md = to_markdown(build_summary(case))
     assert "P0335 (pending)" in md and "(inferred from the order of events)" in md
+
+
+def test_markdown_flattens_multiline_notes_and_escapes_dollars(tmp_path):
+    case = Case(SessionStore(tmp_path).open("md"))
+    case.append("observation", "line one\n# not a heading\nvolts $5 and $6")
+    md = to_markdown(build_summary(case))
+    line = next(ln for ln in md.splitlines() if "line one" in ln)
+    assert "# not a heading" in line and "\\$5 and \\$6" in line
+    assert "$5" not in md.replace("\\$5", "")
+
+
+def test_vehicle_only_case_has_a_timeline_placeholder(tmp_path):
+    case = Case(SessionStore(tmp_path).open("v"))
+    case.set_vehicle(Vehicle(make="Toyota"))
+    s = build_summary(case)
+    assert "- nothing recorded yet" in to_markdown(s)
+    assert "nothing recorded yet" in to_html(s)

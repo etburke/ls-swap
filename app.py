@@ -154,6 +154,8 @@ def page_capture():
         st.button("View results", key="view_results", on_click=goto, args=("Results", job.saved_id))
     elif job.state in ("error", "cancelled"):
         (st.error if job.state == "error" else st.warning)(job.message)
+    if job.state in ("done", "error") and job.hook_error:
+        st.warning(f"The capture was saved but could not be added to the case: {job.hook_error}")
     log = getattr(job.scope, "log", [])
     if log:
         with st.expander("Scope log (SCPI messages)", expanded=job.state == "error"):
@@ -210,9 +212,17 @@ def page_results():
     a = analyze_capture(data, ss.thresholds)
     show_verdict(a)
     if st.button("Log verdict as observation", key="log_verdict"):
-        Case(sess).append("observation", f"Capture {cid} verdict: " + "; ".join(f.title for f in a.findings),
-                          {}, {"capture": cid})
-        st.success("Added to the case timeline.")
+        case = Case(sess)
+        logged = next((e.data["snapshot"] for e in case.events()
+                       if e.type == "capture" and e.refs.get("capture") == cid and e.data.get("snapshot")), None)
+        titles = ([v["title"] for v in logged["verdict"]] if logged else [f.title for f in a.findings])
+        text = f"Capture {cid} verdict: " + "; ".join(titles)
+        if any(e.type == "observation" and e.text == text and e.refs.get("capture") == cid
+               for e in case.events()):
+            st.info("This verdict is already in the case timeline.")
+        else:
+            case.append("observation", text, {}, {"capture": cid})
+            st.success("Added to the case timeline.")
     st.dataframe([summary_row(a)], hide_index=True)
 
     t0, t1 = float(data.t[0]), float(data.t[-1])

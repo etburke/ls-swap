@@ -85,3 +85,9 @@ def test_arm_appends_a_capture_event_with_the_verdict_snapshot(c):
     assert len(ev) == 1 and ev[0].text == "baseline" and ev[0].data["sim"] is True
     assert ev[0].data["snapshot"]["verdict"][0]["code"] == "ground_lift"
     assert ev[0].refs["capture"] == c.snapshot()["saved_id"]
+
+
+def test_snapshot_reports_a_failed_case_hook(c):
+    c.arm("x")
+    c.job.hook_error = "RuntimeError: log full"
+    assert c.snapshot()["hook_error"] == "RuntimeError: log full"

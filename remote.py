@@ -71,3 +71,5 @@ def render(ctrl):
         st.caption("Full plots are on the laptop's Results page.")
     elif state in ("error", "cancelled"):
         (st.error if state == "error" else st.warning)(snap["message"])
+    if state in ("done", "error") and snap["hook_error"]:
+        st.warning(f"The capture was saved but could not be added to the case: {snap['hook_error']}")
