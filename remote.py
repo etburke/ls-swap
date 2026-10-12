@@ -26,6 +26,17 @@ def render(ctrl):
         else:
             st.rerun()
 
+    with st.expander("Log something"):
+        note = st.text_input("What happened?", key="remote_note")
+        c1, c2 = st.columns(2)
+        for col, kind, key in ((c1, "observation", "remote_obs"), (c2, "change", "remote_change")):
+            if col.button(f"Add {kind}", key=key, use_container_width=True):
+                try:
+                    ctrl.case().append(kind, note)
+                    st.success(f"Added {kind}.")
+                except ValueError as e:
+                    st.error(str(e))
+
     state = snap["state"]
     if snap["running"]:
         if state in ("armed", "triggered"):

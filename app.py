@@ -6,15 +6,17 @@ import streamlit as st
 
 from crank.analysis import analyze_capture
 from crank.capture import CaptureJob
+from crank.case import Case
 from crank.controller import get_controller, lan_ip
 from crank.model import CaptureSettings, ChannelConfig, Thresholds
 from crank.procedure import STEPS
 from crank.report import build_figure, build_overlay, to_csv
 from crank.scope import RigolScope, ScopeError
 from crank.sim import SCENARIOS
+import case_ui
 import remote
 
-PAGES = ["Capture", "Results", "Guided tests", "Compare"]
+PAGES = ["Case", "Capture", "Results", "Guided tests", "Compare"]
 SEVERITY_ICON = {"fail": "🔴", "warn": "🟠", "info": "🟢"}
 
 is_remote = st.query_params.get("page") == "remote"
@@ -33,7 +35,7 @@ ss.setdefault("settings", ctrl.settings)
 ss.setdefault("thresholds", ctrl.thresholds)
 ss["job"] = ctrl.job                                  # a capture armed from the phone shows here too
 ss.setdefault("view", None)           # capture id shown on Results
-ss.setdefault("page", "Capture")
+ss.setdefault("page", "Capture" if ctrl.store.open(ctrl.session_name).list_captures() else "Case")
 
 
 def goto(page, view=None):
@@ -207,6 +209,10 @@ def page_results():
     data = sess.load_capture(cid)
     a = analyze_capture(data, ss.thresholds)
     show_verdict(a)
+    if st.button("Log verdict as observation", key="log_verdict"):
+        Case(sess).append("observation", f"Capture {cid} verdict: " + "; ".join(f.title for f in a.findings),
+                          {}, {"capture": cid})
+        st.success("Added to the case timeline.")
     st.dataframe([summary_row(a)], hide_index=True)
 
     t0, t1 = float(data.t[0]), float(data.t[-1])
@@ -245,6 +251,7 @@ def page_guided():
                                                   format="%.3f", key=key)
             if step.fields and st.button("Save step", key=f"save_{step.id}"):
                 sess.set_reading(step.id, vals)
+                Case(sess).log_guided_step(step, vals)
                 st.rerun()
             if step.kind == "capture":
                 st.button("Go to Capture", key=f"go_{step.id}", on_click=goto, args=("Capture",))
@@ -276,6 +283,15 @@ def page_compare():
         with col:
             show_verdict(a)
     st.dataframe([{"capture": n, **summary_row(a)} for n, _, a in picks], hide_index=True)
+    if ss.get("cmp_sess_A") == ss.get("cmp_sess_B"):
+        what = st.text_input("What changed between A and B?", key="cmp_change")
+        if st.button("Mark as before (A) and after (B) of a change", key="cmp_mark"):
+            try:
+                Case(ss.store.open(ss.cmp_sess_A)).append(
+                    "change", what, {}, {"before": ss.cmp_cap_A, "after": ss.cmp_cap_B})
+                st.success("Linked in the case timeline.")
+            except ValueError as e:
+                st.error(str(e))
     chans = sorted(set(picks[0][1].channels) & set(picks[1][1].channels))
     if chans:
         ch = st.selectbox("Channel to overlay", chans, key="cmp_ch",
@@ -288,5 +304,5 @@ def page_compare():
                         use_container_width=True)
 
 
-{"Capture": page_capture, "Results": page_results,
+{"Case": lambda: case_ui.render(ss), "Capture": page_capture, "Results": page_results,
  "Guided tests": page_guided, "Compare": page_compare}[ss.page]()
