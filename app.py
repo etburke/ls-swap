@@ -1,32 +1,37 @@
 """Crank signal test harness UI. Run with:  streamlit run app.py"""
 import dataclasses
-import os
 import time
 
 import streamlit as st
 
 from crank.analysis import analyze_capture
 from crank.capture import CaptureJob
+from crank.controller import get_controller, lan_ip
 from crank.model import CaptureSettings, ChannelConfig, Thresholds
 from crank.procedure import STEPS
 from crank.report import build_figure, build_overlay, to_csv
-from crank.scope import RigolScope, ScopeError, SimScope
+from crank.scope import RigolScope, ScopeError
 from crank.sim import SCENARIOS
-from crank.store import SessionStore
+import remote
 
-ROOT = os.environ.get("CRANK_SESSIONS_DIR", "sessions")
-POLL_S = float(os.environ.get("CRANK_POLL_S", "0.2"))
 PAGES = ["Capture", "Results", "Guided tests", "Compare"]
 SEVERITY_ICON = {"fail": "🔴", "warn": "🟠", "info": "🟢"}
 
-st.set_page_config(page_title="Crank Test Harness", layout="wide")
+is_remote = st.query_params.get("page") == "remote"
+st.set_page_config(page_title="Crank Remote" if is_remote else "Crank Test Harness",
+                   layout="centered" if is_remote else "wide",
+                   initial_sidebar_state="collapsed" if is_remote else "auto")
+ctrl = get_controller()                               # shared by the laptop and phone sessions
+if is_remote:
+    remote.render(ctrl)
+    st.stop()
+
 ss = st.session_state
-ss.setdefault("store", SessionStore(ROOT))
-ss.setdefault("session_name", "default")
-ss.setdefault("settings", CaptureSettings())
-ss.setdefault("thresholds", Thresholds())
-ss.setdefault("job", None)
-ss.setdefault("scope", None)
+ss.setdefault("store", ctrl.store)
+ss.setdefault("session_name", ctrl.session_name)
+ss.setdefault("settings", ctrl.settings)
+ss.setdefault("thresholds", ctrl.thresholds)
+ss["job"] = ctrl.job                                  # a capture armed from the phone shows here too
 ss.setdefault("view", None)           # capture id shown on Results
 ss.setdefault("page", "Capture")
 
@@ -52,23 +57,23 @@ with st.sidebar:
         st.text_input("VISA resource (blank = auto-detect)", key="resource")
         if st.button("Connect", key="connect", disabled=job_busy):
             try:
-                if ss.scope:
-                    ss.scope.close()
-                ss.scope = RigolScope(ss.get("resource") or None)
-                st.success(f"Connected: {ss.scope.identify()}")
+                if ctrl.scope:
+                    ctrl.scope.close()
+                ctrl.scope = RigolScope(ss.get("resource") or None)
+                st.success(f"Connected: {ctrl.scope.identify()}")
             except ScopeError as e:
-                ss.scope = None
+                ctrl.scope = None
                 st.error(str(e))
-        if ss.scope:
+        if ctrl.scope:
             st.caption("Connected to a real scope.")
             if st.button("Self-check settings", key="self_check", disabled=job_busy):
                 try:
-                    for ok, line in ss.scope.self_check(ss.settings):
+                    for ok, line in ctrl.scope.self_check(ss.settings):
                         (st.success if ok else st.error)(line)
                 except ScopeError as e:
                     st.error(str(e))
-                if ss.scope.log:
-                    st.code("\n".join(ss.scope.log))
+                if ctrl.scope.log:
+                    st.code("\n".join(ctrl.scope.log))
 
     st.divider()
     names = ss.store.list_sessions()
@@ -86,6 +91,10 @@ with st.sidebar:
             st.error(str(e))
     st.divider()
     st.radio("Page", PAGES, key="page")
+    st.caption("Phone remote (same Wi-Fi):")
+    st.code(f"http://{lan_ip()}:{st.get_option('server.port')}/?page=remote", language=None)
+    ctrl.sync(mode=mode, scenario=ss.get("scenario"), session_name=ss.session_name,
+              settings=ss.settings, thresholds=ss.thresholds)
 
 
 # ------------------------------------------------------------------ capture
@@ -109,22 +118,17 @@ def page_capture():
         trig = c4.number_input("Trigger level (V)", -10.0, 10.0, s.trig_level, disabled=busy)
         ss.settings = CaptureSettings(seconds, pretrig, depth, trig, s.wait,
                                       [ChannelConfig(**r) for r in rows])
+        ctrl.sync(settings=ss.settings)
 
     label = st.text_input("Capture label (what changed?)", key="cap_label")
     note = st.text_input("Note", key="cap_note")
 
     if st.button("Arm", key="arm", type="primary", disabled=busy):
-        if mode == "Simulator":
-            scope = SimScope(ss.scenario)
-        elif ss.scope:
-            scope = ss.scope
-        else:
-            st.error("Connect to the scope first.")
+        err = ctrl.arm(label, note)
+        if err:
+            st.error(err)
             return
-        sess = session()
-        ss.job = CaptureJob(scope, ss.settings, ss.thresholds, poll_s=POLL_S,
-                            save=lambda d: sess.add_capture(d, label, note))
-        ss.job.start()
+        ss.job = ctrl.job
         st.rerun()
 
     job = ss.job
@@ -137,7 +141,7 @@ def page_capture():
         else:
             st.info(f"State: {job.state}")
         if st.button("Cancel", key="cancel"):
-            job.cancel()
+            ctrl.cancel()
         time.sleep(0.5)
         st.rerun()
     elif job.state == "done":
