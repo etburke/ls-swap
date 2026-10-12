@@ -37,7 +37,20 @@ def _cap_line(c: dict) -> str:
 
 def _code(c: dict) -> str:
     st_ = f" ({c['status']})" if c.get("status") else ""
-    return f"{c.get('code')}{st_} {c.get('description', '')}".strip()
+    sim = " [SIMULATED]" if c.get("sim") else ""
+    return f"{c.get('code')}{st_}{sim} {c.get('description', '')}".strip()
+
+
+def _measure(m: dict) -> str:
+    sim = " [SIMULATED]" if m.get("sim") else ""
+    return f"{m['name']}: {m['value']:g} {m['unit']}{sim}" + (f" ({m['where']})" if m["where"] else "")
+
+
+def _freeze(ff: dict) -> str:
+    sim = " [SIMULATED]" if ff.get("sim") else ""
+    vals = "; ".join(f"{v['name']} {v['value']:g} {v['unit']}" for v in ff.get("values", []))
+    return (f"Freeze frame{sim} for {ff.get('code')} {ff.get('description', '')}: ".replace("  ", " ")
+            + (vals or NOT_RECORDED))
 
 
 INFERRED = "(inferred from the order of events)"
@@ -63,7 +76,9 @@ def to_markdown(s: Summary) -> str:
     out += ["", "## Key data"]
     if s.codes:
         out.append("- Codes: " + ", ".join(_code(c) for c in s.codes))
-    out += [f"- {m['name']}: {m['value']:g} {m['unit']}" + (f" ({m['where']})" if m["where"] else "") for m in s.measurements]
+    if s.freeze_frame:
+        out.append("- " + _freeze(s.freeze_frame))
+    out += [f"- {_measure(m)}" for m in s.measurements]
     out += [f"- Capture {_cap_line(c)}" for c in s.captures]
     if not (s.codes or s.measurements or s.captures):
         out.append(f"- {NOT_RECORDED}")
@@ -150,7 +165,9 @@ def to_html(s: Summary, plots: dict | None = None) -> str:
         data = []
         if s.codes:
             data.append("Codes: " + e(", ".join(_code(c) for c in s.codes)))
-        data += [f"{e(m['name'])}: {m['value']:g} {e(m['unit'])}" for m in s.measurements]
+        if s.freeze_frame:
+            data.append(e(_freeze(s.freeze_frame)))
+        data += [e(_measure(m)) for m in s.measurements]
         body.append("<h2>Key data</h2>" + (_li(data) or f"<p class='muted'>{NOT_RECORDED}</p>"))
         if s.captures:
             body.append('<div class="pair">' + "".join(_cap_html(c, plots.get(c["id"], "")) for c in s.captures) + "</div>")

@@ -120,7 +120,7 @@ def _validate(type_: str, text: str, data: dict) -> None:
             raise ValueError("changing a hypothesis to ruled out or confirmed needs a reason")
     elif type_ in ("symptom", "observation", "change") and not text.strip():
         raise ValueError(f"a {type_} needs some text")
-    elif type_ == "code_read" and not data.get("codes"):
+    elif type_ == "code_read" and not data.get("codes") and data.get("source") != "obd":
         raise ValueError("a code read needs at least one code")
 
 
@@ -194,6 +194,19 @@ class Case:
     def append_capture(self, capture_id: str, label: str, analysis, sim: bool) -> Event:
         return self.append("capture", label, {"snapshot": capture_snapshot(analysis), "sim": sim},
                            {"capture": capture_id})
+
+    def append_obd(self, readout) -> list[Event]:
+        """Record one OBD read: a code_read (empty list = a clean read) plus a measurement per live value."""
+        out = [self.append("code_read", "", readout.to_event_data())]
+        rpm = next((v.value for v in readout.live if v.name == "Engine RPM"), None)
+        cond = "OBD, engine running" if rpm else "OBD, PCM reports 0 RPM or no RPM"
+        for v in readout.live:
+            if v.value is None:
+                continue
+            out.append(self.append("measurement", "", {
+                "name": v.name, "value": v.value, "unit": v.unit, "where": "OBD live data",
+                "conditions": cond, "sim": readout.sim}, {"obd": out[0].id}))
+        return out
 
     def log_guided_step(self, step, values: dict) -> list[Event]:
         """Turn a saved guided-test step into events."""

@@ -19,7 +19,8 @@ class Summary:
     open: list = field(default_factory=list)            # [{"title", "reason", "evidence"}]
     confirmed: list = field(default_factory=list)
     measurements: list = field(default_factory=list)    # latest per name
-    codes: list = field(default_factory=list)           # active codes from the latest code read
+    codes: list = field(default_factory=list)           # every code read, with its latest status
+    freeze_frame: dict | None = None                    # from the latest OBD read that had one
     captures: list = field(default_factory=list)        # [{"id","label","ts","sim","snapshot"}]
     before_after: list = field(default_factory=list)    # [{"change","before","after"}]
     not_tried: list = field(default_factory=list)       # guided step titles with no data
@@ -51,6 +52,10 @@ def describe(e: Event) -> str:
         head = (snap["verdict"][0]["title"] if snap and snap.get("verdict") else "verdict " + NOT_RECORDED)
         return f"Capture {e.refs.get('capture', '?')}{sim}: {e.text or 'unlabeled'} — {head}"
     if e.type == "code_read":
+        sim = " [SIMULATED]" if d.get("sim") else ""
+        if d.get("source") == "obd":
+            codes = ", ".join(f"{c.get('code', '?')} ({c.get('status', '?')})" for c in d.get("codes", []))
+            return f"OBD read{sim}: " + (codes or "no stored, pending or permanent codes")
         codes = ", ".join(c.get("code", "?") for c in d.get("codes", []))
         return f"Read codes: {codes}"
     if e.type == "hypothesis":
@@ -79,15 +84,26 @@ def build_summary(case: Case) -> Summary:
             key = (e.data.get("name", ""), e.data.get("where", ""), e.data.get("conditions", ""))
             latest[key] = e
     s.measurements = [dict(name=e.data.get("name", ""), value=e.data["value"], unit=e.data.get("unit", ""),
-                           where=e.data.get("where", ""), conditions=e.data.get("conditions", ""))
+                           where=e.data.get("where", ""), conditions=e.data.get("conditions", ""),
+                           sim=bool(e.data.get("sim")))
                       for e in latest.values()]
 
     codes: dict[str, dict] = {}                       # every code ever read, with its latest status
     for e in events:
-        if e.type == "code_read":
-            for c in e.data.get("codes", []):
-                if isinstance(c, dict) and c.get("code"):
-                    codes[c["code"]] = c
+        if e.type != "code_read":
+            continue
+        rows = [c for c in e.data.get("codes", []) if isinstance(c, dict) and c.get("code")]
+        sim = bool(e.data.get("sim"))
+        if e.data.get("source") == "obd":               # an OBD read lists every code the PCM holds
+            now = {c["code"] for c in rows}
+            for k, c in list(codes.items()):
+                if k not in now:
+                    codes[k] = {**c, "status": "not in latest OBD read"}
+            ff = e.data.get("freeze_frame")
+            if isinstance(ff, dict):
+                s.freeze_frame = {**ff, "sim": sim, "ts": e.ts}
+        for c in rows:
+            codes[c["code"]] = {**c, "sim": sim}
     s.codes = list(codes.values())
 
     caps = [e for e in events if e.type == "capture"]
