@@ -1,0 +1,7 @@
+numpy>=1.26
+streamlit>=1.40
+plotly>=5.20
+pyvisa>=1.13
+pyvisa-py>=0.7
+pyusb>=1.2
+pytest>=8
