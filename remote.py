@@ -37,6 +37,17 @@ def render(ctrl):
                 except ValueError as e:
                     st.error(str(e))
 
+    from crank.obd.transport import SCENARIOS
+    with st.expander("Read OBD (simulated)"):
+        scen = st.selectbox("Simulated vehicle", list(SCENARIOS), key="remote_obd_scenario")
+        if st.button("Read OBD", key="remote_obd", use_container_width=True):
+            readout, err = ctrl.read_obd(scen)
+            if err:
+                st.error(err)
+            else:
+                for line in readout.lines():
+                    st.write("- " + line)
+
     state = snap["state"]
     if snap["running"]:
         if state in ("armed", "triggered"):

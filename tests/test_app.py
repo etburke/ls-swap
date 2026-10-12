@@ -298,3 +298,26 @@ def test_a_report_goes_stale_when_the_case_changes(at):
     _case().append("observation", "new info")
     at.run()
     assert any("out of date" in w.value for w in at.warning)
+
+
+def test_case_page_obd_read_records_codes_and_shows_a_result(at):
+    at.selectbox(key="obd_scenario").select("p2119_zero_rpm").run()
+    at.button(key="obd_read").click().run()
+    assert not at.exception
+    assert any("P2119 (stored)" in m.value for m in at.markdown)
+    assert [e.type for e in get_controller().case().events()].count("code_read") == 1
+
+
+def test_case_page_obd_failure_shows_an_error_and_records_nothing(at):
+    at.selectbox(key="obd_scenario").select("silent_adapter").run()
+    at.button(key="obd_read").click().run()
+    assert not at.exception and at.error
+    assert get_controller().case().events() == []
+
+
+def test_phone_remote_obd_button(at):
+    at.query_params["page"] = "remote"
+    at.run()
+    at.button(key="remote_obd").click().run()
+    assert not at.exception
+    assert any("Codes (simulated)" in m.value for m in at.markdown)

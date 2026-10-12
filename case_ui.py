@@ -3,6 +3,8 @@ from dataclasses import asdict, fields
 
 import streamlit as st
 
+from crank.controller import get_controller
+from crank.obd.transport import SCENARIOS
 from crank.case import EVENT_TYPES, HYPOTHESIS_STATUSES, Case, Vehicle, suggest_hypotheses
 from crank.render import capture_svg, to_html, to_markdown
 from crank.summary import build_summary
@@ -67,6 +69,21 @@ def _quick_add(case, capture_ids):
             st.rerun()
         except ValueError as e:
             st.error(str(e))
+
+
+def _obd(case):
+    st.subheader("Read from the vehicle (OBD-II)")
+    st.caption("Simulator only until an adapter is connected. A read adds the codes, freeze frame and "
+               "live values to the case; it never clears codes.")
+    scen = st.selectbox("Simulated vehicle", list(SCENARIOS), key="obd_scenario")
+    if st.button("Read from OBD", key="obd_read"):
+        readout, err = get_controller().read_obd(scen)
+        if err:
+            st.error(err)
+        else:
+            st.success("Recorded in the case:")
+            for line in readout.lines():
+                st.write("- " + line)
 
 
 def _board(case, last_codes):
@@ -153,6 +170,7 @@ def render(ss):
     _vehicle(case)
     cap_ids = [c["id"] for c in case.session.list_captures()]
     _quick_add(case, cap_ids)
+    _obd(case)
     snaps = [e.data["snapshot"] for e in events if e.type == "capture" and e.data.get("snapshot")]
     codes = [v["code"] for v in snaps[-1]["verdict"]] if snaps else []
     _board(case, codes)
