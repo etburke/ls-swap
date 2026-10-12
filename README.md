@@ -121,7 +121,7 @@ can be added without touching the protocol code.
 - The horizontal-offset sign, valid memory depths in 4-channel mode, and the RAW preamble point count.
 - The verdict thresholds are tuned on simulated data and will need adjusting after the first real captures.
 - 12-bit (WORD) waveform download is not implemented; data is 8-bit.
-- The OBD layer: ELM327 clone quirks and timing, protocol auto-detection on this vehicle, and which modes and PIDs the PSI-flashed E38 answers.
+- The OBD layer: ELM327 clone quirks and timing, protocol auto-detection on this vehicle, and which modes and PIDs the PSI-flashed E38 answers. Before the first real read the reader must also handle several ECUs answering one request (for example a transmission controller): today the first answer wins.
 
 ## Code layout
 

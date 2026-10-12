@@ -47,12 +47,23 @@ def test_zero_rpm_condition_does_not_claim_the_engine_is_off(case):
     events = case.append_obd(read("p2119_zero_rpm"))
     rpm = next(e for e in events if e.data.get("name") == "Engine RPM")
     assert rpm.data["value"] == 0.0 and "engine off" not in rpm.data["conditions"]
-    assert "0 RPM" in rpm.data["conditions"]
+    assert rpm.data["conditions"] == "OBD, PCM reports 0 RPM"
+
+
+def test_condition_when_rpm_is_not_answered(case):
+    r = read("limited_pcm")
+    for v in r.live:
+        if v.name == "Engine RPM":
+            v.value = None
+    events = case.append_obd(r)
+    others = [e for e in events if e.type == "measurement"]
+    assert others and all(e.data["conditions"] == "OBD, PCM reported no RPM" for e in others)
 
 
 def test_running_condition_when_rpm_is_nonzero(case):
     events = case.append_obd(read("healthy"))
-    assert next(e for e in events if e.data.get("name") == "Engine RPM").data["conditions"] == "OBD, engine running"
+    cond = next(e for e in events if e.data.get("name") == "Engine RPM").data["conditions"]
+    assert cond == "OBD, PCM reports 750 RPM" and "running" not in cond
 
 
 def test_summary_carries_status_freeze_frame_and_simulated_flag(case):
@@ -92,6 +103,51 @@ def test_reports_label_simulated_obd_data_and_show_the_freeze_frame(case):
     assert "Engine RPM: 0 rpm [SIMULATED]" in md
     html = to_html(build_summary(case))
     assert "P2119 (stored) [SIMULATED]" in html and "Freeze frame [SIMULATED]" in html
+
+
+def _unread(modes):
+    r = read("healthy")
+    r.unsupported_modes = list(modes)
+    return r
+
+
+def test_earlier_stored_code_is_not_demoted_when_mode_03_was_not_read(case):
+    case.append_obd(read("p2119_zero_rpm"))
+    case.append_obd(_unread(["03"]))
+    s = build_summary(case)
+    assert s.codes[0]["status"] == "stored"
+    line = [t["line"] for t in s.timeline if t["type"] == "code_read"][-1]
+    assert "modes not read: 03" in line and "no stored, pending or permanent codes" not in line
+    assert "no codes reported by the modes that were read" in line
+
+
+def test_other_modes_still_demote_codes(case):
+    case.append_obd(read("p2119_zero_rpm"))
+    case.append_obd(_unread(["07"]))
+    assert build_summary(case).codes[0]["status"] == "not in latest OBD read"
+
+
+def test_a_clean_later_read_clears_the_stale_freeze_frame(case):
+    case.append_obd(read("many_codes"))
+    assert build_summary(case).freeze_frame["code"] == "P0335"
+    case.append_obd(read("healthy"))
+    assert build_summary(case).freeze_frame is None
+
+
+def test_mode_02_unsupported_leaves_the_freeze_frame_unchanged(case):
+    case.append_obd(read("many_codes"))
+    case.append_obd(_unread(["02"]))
+    assert build_summary(case).freeze_frame["code"] == "P0335"
+
+
+def test_one_engine_rpm_row_the_latest_read_wins(case):
+    case.append_obd(read("healthy"))
+    case.append_obd(read("p2119_zero_rpm"))
+    s = build_summary(case)
+    rows = [m for m in s.measurements if m["name"] == "Engine RPM"]
+    assert len(rows) == 1 and rows[0]["value"] == 0
+    md = to_markdown(s)
+    assert len([ln for ln in md.splitlines() if "Engine RPM" in ln and ln.startswith("- Engine RPM")]) == 1
 
 
 def test_reports_escape_obd_text(case):

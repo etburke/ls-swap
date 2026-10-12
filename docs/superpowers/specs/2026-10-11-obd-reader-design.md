@@ -53,7 +53,7 @@ crank/obd/reader.py      ObdReader, ObdReadout
 
 - One `code_read` event per read: `data = {codes, freeze_frame, mil_on, source: "obd", sim, protocol, unsupported_modes, raw}`. A clean read records an empty `codes` list. `_validate` allows an empty list only when `source == "obd"` (a manual code entry still needs a code). This matters: the summary treats an OBD read as the complete list the PCM holds, so a later clean read must be able to say "no codes now".
 - In the summary, a code seen earlier but absent from a later OBD read keeps its row with status "not in latest OBD read"; manual history codes are never deleted.
-- Each supported live value appends a `measurement` (name, value, unit, where "OBD live data", `sim` flag, conditions "OBD, engine running" if the RPM read is above 0, else "OBD, PCM reports 0 RPM or no RPM"; the tool never claims the engine is off, because 0 RPM while cranking is the symptom under investigation). Unsupported values append nothing.
+- Each supported live value appends a `measurement` (name, value, unit, where "OBD live data", `sim` flag, conditions "OBD, PCM reports <rpm> RPM" when RPM was read (including 0), else "OBD, PCM reported no RPM"; the tool never claims the engine is running or off, because the PCM reports about 150-250 RPM while cranking and 0 RPM while cranking is the symptom under investigation). Unsupported values append nothing.
 - Raw responses are stored in the `code_read` event for evidence, not shown in reports.
 - Summary: codes carry status; a freeze-frame block is added; simulator reads are labeled simulated. Markdown and HTML renderers show these and escape all text.
 - A read that fails (timeout, no adapter, garbage) appends nothing and shows a plain error.

@@ -120,6 +120,8 @@ class ObdReader:
             return
         if not data or len(data) < 2:
             return
+        if data[0] == 0 and data[1] == 0:                  # 42 02 00 00: the PCM holds no freeze frame
+            return
         code = P.decode_dtc(data[0], data[1])
         values = []
         for pid in FREEZE_PIDS:

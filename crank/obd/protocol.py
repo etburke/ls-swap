@@ -55,6 +55,11 @@ def _hex(s: str) -> bytes:
     return bytes.fromhex(s)
 
 
+_NOT_SUPPORTED_NRC = (0x11, 0x12, 0x31)    # service / sub-function not supported, request out of range
+_NRC_TEXT = {0x21: "busy / conditions not correct", 0x22: "busy / conditions not correct",
+             0x78: "response pending"}
+
+
 def request(mode: int, pid: int | None = None, frame: bool = False) -> str:
     """e.g. request(1, 0x0C) -> '010C'; request(2, 0x0C, frame=True) -> '020C00'."""
     s = f"{mode:02X}" + (f"{pid:02X}" if pid is not None else "")
@@ -62,7 +67,7 @@ def request(mode: int, pid: int | None = None, frame: bool = False) -> str:
 
 
 def response_data(resp: str, mode: int, pid: int | None = None, frame: bool = False) -> bytes | None:
-    """The data bytes of the first message answering this mode/PID; None for NO DATA."""
+    """The data bytes of the message answering this mode/PID (a positive one wins); None for NO DATA."""
     msgs = messages(resp)
     if msgs is None:
         return None
@@ -70,8 +75,15 @@ def response_data(resp: str, mode: int, pid: int | None = None, frame: bool = Fa
     for m in msgs:
         if m.startswith(head):
             return m[len(head):]
-        if len(m) >= 3 and m[0] == 0x7F and m[1] == mode:
+    negatives = [m for m in msgs if len(m) >= 3 and m[0] == 0x7F and m[1] == mode]
+    for m in negatives:
+        if m[2] in _NOT_SUPPORTED_NRC:
             raise ObdNotSupported(f"The PCM does not support mode {mode:02X} (negative response {m[2]:02X}).")
+    if negatives:
+        nrc = negatives[0][2]
+        what = _NRC_TEXT.get(nrc, "an error")
+        raise ObdProtocolError(f"The PCM answered '{what}' (negative response {nrc:02X}) to mode {mode:02X}; "
+                               "try again.")
     raise ObdProtocolError(f"Unexpected reply to mode {mode:02X}: {msgs[0].hex().upper()}.")
 
 

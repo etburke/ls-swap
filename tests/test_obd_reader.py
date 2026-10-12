@@ -94,3 +94,24 @@ def test_readout_lines_are_plain_language():
     assert lines[0] == "Codes (simulated): P2119 (stored)" and "Check engine light: on" in lines
     assert any(l.startswith("Live values read: 2 of 10 (not supported:") for l in lines)
     assert any("does not support mode" in l for l in lines)
+
+
+def test_freeze_frame_dtc_0000_means_no_freeze_frame():
+    class NoFreeze(SimTransport):
+        def send(self, cmd, timeout=5.0):
+            if cmd.strip().upper().replace(" ", "") == "020200":
+                return "42 02 00 00 00"
+            return super().send(cmd, timeout)
+    r = ObdReader(NoFreeze("p2119_zero_rpm")).read()
+    assert r.freeze_frame is None
+    assert not any(k.startswith("02") and k != "020200" for k in r.raw)
+
+
+def test_busy_pcm_on_mode_03_fails_the_read_rather_than_marking_it_unsupported():
+    class Busy(SimTransport):
+        def send(self, cmd, timeout=5.0):
+            if cmd.strip() == "03":
+                return "7F 03 21"
+            return super().send(cmd, timeout)
+    with pytest.raises(ObdProtocolError):
+        ObdReader(Busy("healthy")).read()

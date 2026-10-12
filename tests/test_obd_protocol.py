@@ -95,3 +95,29 @@ def test_protocol_number_means_can_or_not(text, can):
 
 def test_known_and_unknown_descriptions():
     assert "Throttle" in P.describe_dtc("P2119") and P.describe_dtc("P9999") is None
+
+
+def test_positive_message_wins_over_response_pending():
+    assert P.response_data("7F 03 78\r43 01 21 19", 0x03) == bytes([0x01, 0x21, 0x19])
+
+
+def test_only_response_pending_is_a_protocol_error_not_unsupported():
+    from crank.obd.errors import ObdNotSupported
+    with pytest.raises(ObdProtocolError) as ei:
+        P.response_data("7F 03 78", 0x03)
+    assert not isinstance(ei.value, ObdNotSupported)
+
+
+def test_busy_negative_response_is_a_protocol_error_not_unsupported():
+    from crank.obd.errors import ObdNotSupported
+    with pytest.raises(ObdProtocolError) as ei:
+        P.response_data("7F 03 21", 0x03)
+    assert not isinstance(ei.value, ObdNotSupported)
+    assert "busy" in str(ei.value) and "21" in str(ei.value)
+
+
+@pytest.mark.parametrize("nrc", ["11", "12", "31"])
+def test_unsupported_negative_responses_raise_not_supported(nrc):
+    from crank.obd.errors import ObdNotSupported
+    with pytest.raises(ObdNotSupported):
+        P.response_data(f"7F 03 {nrc}", 0x03)

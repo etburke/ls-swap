@@ -7,6 +7,7 @@ from .case import Case, Event, Vehicle
 from .procedure import STEPS
 
 NOT_RECORDED = "not recorded"
+_MODE_OF_STATUS = {"stored": "03", "pending": "07", "permanent": "0A"}
 
 
 @dataclass
@@ -20,7 +21,7 @@ class Summary:
     confirmed: list = field(default_factory=list)
     measurements: list = field(default_factory=list)    # latest per name
     codes: list = field(default_factory=list)           # every code read, with its latest status
-    freeze_frame: dict | None = None                    # from the latest OBD read that had one
+    freeze_frame: dict | None = None                    # from the latest OBD read that read mode 02
     captures: list = field(default_factory=list)        # [{"id","label","ts","sim","snapshot"}]
     before_after: list = field(default_factory=list)    # [{"change","before","after"}]
     not_tried: list = field(default_factory=list)       # guided step titles with no data
@@ -56,7 +57,11 @@ def describe(e: Event) -> str:
         sim = " [SIMULATED]" if d.get("sim") else ""
         if d.get("source") == "obd":
             codes = ", ".join(f"{c.get('code', '?')} ({c.get('status', '?')})" for c in d.get("codes", []))
-            return f"OBD read{sim}: " + (codes or "no stored, pending or permanent codes")
+            unread = [str(m) for m in d.get("unsupported_modes") or []]
+            if not codes:
+                codes = ("no codes reported by the modes that were read" if unread
+                         else "no stored, pending or permanent codes")
+            return f"OBD read{sim}: {codes}" + (f"; modes not read: {', '.join(unread)}" if unread else "")
         codes = ", ".join(c.get("code", "?") for c in d.get("codes", []))
         return f"Read codes: {codes}"
     if e.type == "hypothesis":
@@ -82,7 +87,9 @@ def build_summary(case: Case) -> Summary:
     latest: dict[tuple, Event] = {}
     for e in events:
         if e.type == "measurement":
-            key = (e.data.get("name", ""), e.data.get("where", ""), e.data.get("conditions", ""))
+            where = e.data.get("where", "")
+            key = ((e.data.get("name", ""), where) if where == "OBD live data"
+                   else (e.data.get("name", ""), where, e.data.get("conditions", "")))
             latest[key] = e
     s.measurements = [dict(name=e.data.get("name", ""), value=e.data["value"], unit=e.data.get("unit", ""),
                            where=e.data.get("where", ""), conditions=e.data.get("conditions", ""),
@@ -97,12 +104,13 @@ def build_summary(case: Case) -> Summary:
         sim = bool(e.data.get("sim"))
         if e.data.get("source") == "obd":               # an OBD read lists every code the PCM holds
             now = {c["code"] for c in rows}
+            unread = set(e.data.get("unsupported_modes") or [])
             for k, c in list(codes.items()):
-                if k not in now:
+                if k not in now and _MODE_OF_STATUS.get(c.get("status")) not in unread:
                     codes[k] = {**c, "status": "not in latest OBD read"}
-            ff = e.data.get("freeze_frame")
-            if isinstance(ff, dict):
-                s.freeze_frame = {**ff, "sim": sim, "ts": e.ts}
+            if "02" not in unread:                       # mode 02 was read: this read's frame (or none) is current
+                ff = e.data.get("freeze_frame")
+                s.freeze_frame = {**ff, "sim": sim, "ts": e.ts} if isinstance(ff, dict) else None
         for c in rows:
             codes[c["code"]] = {**c, "sim": sim}
     s.codes = list(codes.values())

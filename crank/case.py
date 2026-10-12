@@ -199,7 +199,7 @@ class Case:
         """Record one OBD read: a code_read (empty list = a clean read) plus a measurement per live value."""
         out = [self.append("code_read", "", readout.to_event_data())]
         rpm = next((v.value for v in readout.live if v.name == "Engine RPM"), None)
-        cond = "OBD, engine running" if rpm else "OBD, PCM reports 0 RPM or no RPM"
+        cond = "OBD, PCM reported no RPM" if rpm is None else f"OBD, PCM reports {rpm:g} RPM"
         for v in readout.live:
             if v.value is None:
                 continue
