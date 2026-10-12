@@ -330,3 +330,18 @@ def test_logging_the_verdict_twice_adds_one_observation(at):
     at.button(key="log_verdict").click().run()
     obs = [e for e in _case().events() if e.type == "observation" and "verdict" in e.text]
     assert len(obs) == 1 and any("already" in i.value for i in at.info)
+
+
+def test_change_entry_can_name_its_before_and_after_captures(at):
+    _arm_and_finish(at)
+    _arm_and_finish(at)
+    ids = [c["id"] for c in _case().session.list_captures()]
+    assert len(ids) == 2
+    _go(at, "Case")
+    at.selectbox(key="qa_type").select("change").run()
+    at.text_area(key="qa_text_0").set_value("swapped sensor").run()
+    at.selectbox(key="qa_before_0").select(ids[0]).run()
+    at.selectbox(key="qa_after_0").select(ids[1]).run()
+    at.button(key="qa_add").click().run()
+    ev = next(e for e in _case().events() if e.type == "change")
+    assert ev.refs == {"before": ids[0], "after": ids[1]}
