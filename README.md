@@ -58,7 +58,7 @@ teeth, missing gap, harness fault, late start) lets you run the whole tool, and 
 The sidebar picks **Simulator** or **Real scope**, and the session you're working in. Pages:
 
 - **Case:** the vehicle profile, a quick-add form for symptoms, observations, codes, measurements, changes and
-  suspects, a suspects board (open, ruled out, confirmed), the timeline, and the hand-off report.
+  suspects, a suspects board (open, ruled out, confirmed), the timeline, and the hand-off report. It also has **Read from OBD**, which records codes, freeze frame and live values from the vehicle.
 - **Capture:** channel table and settings, an Arm button, a live "crank now" banner, Cancel, and a log of
   any SCPI commands the scope rejected.
 - **Results:** the verdict, summary numbers, a zoomable plot of all channels with problem events marked, an
@@ -94,6 +94,19 @@ scope mode, scenario, session and settings the laptop currently has; in Real-sco
 laptop first. There is no password: anyone on the network who finds the URL can arm the scope and browse
 captures.
 
+### Reading the vehicle (OBD-II)
+
+**Read from OBD** on the Case page (and **Read OBD** on the phone) asks the vehicle for its stored, pending and
+permanent trouble codes, the freeze frame, and a one-shot snapshot of live values (RPM, battery voltage, coolant
+temperature, fuel trims and a few more). Each read is added to the case: one `code_read` event plus a measurement for
+every value the PCM answered. A value the PCM does not support is listed as not supported, never as zero, and a
+real 0 RPM is kept as 0. The tool never clears codes.
+
+Only the simulator is wired up so far, with eight scenarios (healthy, a stored P2119 with 0 RPM, many codes,
+a PCM with limited support, and four failure modes). The adapter layer is a small `Transport` interface
+(`open`, `send`, `close`), so a classic Bluetooth serial adapter (via `pyserial`) or a BLE adapter (via `bleak`)
+can be added without touching the protocol code.
+
 ## First session at the truck
 
 1. Wire the scope as in the table above. Close any other program holding the scope's USB connection.
@@ -108,6 +121,7 @@ captures.
 - The horizontal-offset sign, valid memory depths in 4-channel mode, and the RAW preamble point count.
 - The verdict thresholds are tuned on simulated data and will need adjusting after the first real captures.
 - 12-bit (WORD) waveform download is not implemented; data is 8-bit.
+- The OBD layer: ELM327 clone quirks and timing, protocol auto-detection on this vehicle, and which modes and PIDs the PSI-flashed E38 answers.
 
 ## Code layout
 
@@ -120,6 +134,7 @@ captures.
     crank/store.py       sessions on disk (captures, readings, notes)
     crank/case.py        a case: vehicle profile and the append-only event log
     crank/summary.py     structured, render-agnostic case summary
+    crank/obd/           OBD-II: protocol (pure parsing), pids, transport (interface and simulator), reader
     crank/render.py      Markdown and self-contained HTML reports
     crank/procedure.py   the guided test steps as data
     crank/report.py      text report and Plotly figures
