@@ -57,6 +57,8 @@ teeth, missing gap, harness fault, late start) lets you run the whole tool, and 
 
 The sidebar picks **Simulator** or **Real scope**, and the session you're working in. Pages:
 
+- **Case:** the vehicle profile, a quick-add form for symptoms, observations, codes, measurements, changes and
+  suspects, a suspects board (open, ruled out, confirmed), the timeline, and the hand-off report.
 - **Capture:** channel table and settings, an Arm button, a live "crank now" banner, Cancel, and a log of
   any SCPI commands the scope rejected.
 - **Results:** the verdict, summary numbers, a zoomable plot of all channels with problem events marked, an
@@ -72,6 +74,16 @@ Command line, same engine:
     .venv/bin/python crank_capture.py capture                    # real scope
     .venv/bin/python crank_capture.py analyze some_capture.npz   # re-analyze a saved file
     .venv/bin/python -m pytest                                   # test suite
+
+### Cases and the hand-off report
+
+Each session is a **case**: a vehicle profile plus an append-only event log (`events.jsonl`) of symptoms,
+observations, codes, measurements, captures, changes and suspects. Captures and guided-test results are logged
+automatically with the verdict as it was at the time; everything else you add on the Case page (or from the phone).
+**Generate report** on the Case page produces Markdown (to paste into an email or forum post) and a
+self-contained HTML page with the ruled-out list and before/after captures. The report contains only what was
+recorded, shows gaps as "not recorded", labels simulator captures as simulated, and presents verdicts as what the
+harness reported, not as a diagnosis. Sessions made before cases existed open as cases without any change to their files.
 
 ### Phone remote
 
@@ -106,9 +118,13 @@ captures.
     crank/capture.py     CaptureJob: arm, wait, download, save, analyze in a background thread
     crank/controller.py  shared state so the phone and laptop drive the same capture
     crank/store.py       sessions on disk (captures, readings, notes)
+    crank/case.py        a case: vehicle profile and the append-only event log
+    crank/summary.py     structured, render-agnostic case summary
+    crank/render.py      Markdown and self-contained HTML reports
     crank/procedure.py   the guided test steps as data
     crank/report.py      text report and Plotly figures
     app.py               Streamlit UI (laptop)
+    case_ui.py           the Case page
     remote.py            phone remote page
     crank_capture.py     command-line front end
     tests/               pytest suite (no hardware needed)
