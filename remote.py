@@ -45,6 +45,7 @@ def render(ctrl):
             if err:
                 st.error(err)
             else:
+                st.success("Recorded in the case:")
                 for line in readout.lines():
                     st.write("- " + line)
 

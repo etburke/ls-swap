@@ -164,3 +164,28 @@ def test_timeline_labels_simulated_measurements_only(case):
     assert len(lines) > 1
     for line in lines:
         assert ("[SIMULATED]" in line) == (not line.startswith("Measured Battery"))
+
+
+def test_unknown_dtc_description_reads_as_not_recorded(case):
+    r = read("p2119_zero_rpm")
+    r.codes[0]["description"] = ""
+    r.freeze_frame["description"] = ""
+    case.append_obd(r)
+    s = build_summary(case)
+    md = to_markdown(s)
+    assert "P2119 (stored) [SIMULATED] description not recorded" in md
+    assert "Freeze frame [SIMULATED] for P2119 description not recorded:" in md
+
+
+def test_freeze_frame_text_is_escaped(case):
+    r = read("p2119_zero_rpm")
+    r.freeze_frame["description"] = "<b>x</b>"
+    case.append_obd(r)
+    assert "<b>x</b>" not in to_html(build_summary(case))
+
+
+def test_manual_codes_after_an_obd_read_are_kept(case):
+    case.append_obd(read("p2119_zero_rpm"))
+    case.append("code_read", "", {"codes": [{"code": "P0335", "description": "", "status": "stored"}]})
+    codes = {c["code"] for c in build_summary(case).codes}
+    assert {"P2119", "P0335"} <= codes

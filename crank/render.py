@@ -38,7 +38,7 @@ def _cap_line(c: dict) -> str:
 def _code(c: dict) -> str:
     st_ = f" ({c['status']})" if c.get("status") else ""
     sim = " [SIMULATED]" if c.get("sim") else ""
-    return f"{c.get('code')}{st_}{sim} {c.get('description', '')}".strip()
+    return f"{c.get('code')}{st_}{sim} {c.get('description') or 'description not recorded'}"
 
 
 def _measure(m: dict) -> str:
@@ -49,7 +49,7 @@ def _measure(m: dict) -> str:
 def _freeze(ff: dict) -> str:
     sim = " [SIMULATED]" if ff.get("sim") else ""
     vals = "; ".join(f"{v['name']} {v['value']:g} {v['unit']}" for v in ff.get("values", []))
-    return (f"Freeze frame{sim} for {ff.get('code')} {ff.get('description', '')}: ".replace("  ", " ")
+    return (f"Freeze frame{sim} for {ff.get('code')} {ff.get('description') or 'description not recorded'}: "
             + (vals or NOT_RECORDED))
 
 
