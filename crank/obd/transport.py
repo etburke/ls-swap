@@ -1,6 +1,7 @@
 """Transport interface for an ELM327-style adapter, and a simulated one for tests and demos."""
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 
 from .errors import ObdNoAdapter, ObdTimeout
@@ -86,7 +87,7 @@ class SimTransport(Transport):
     def __init__(self, scenario: str = "healthy"):
         if scenario not in SCENARIOS:
             raise ValueError(f"unknown OBD scenario {scenario!r}")
-        self.name, self.sc, self.n, self.opened = scenario, SCENARIOS[scenario], 0, False
+        self.name, self.sc, self.n, self.opened = scenario, copy.deepcopy(SCENARIOS[scenario]), 0, False
 
     def open(self) -> None:
         if self.sc.fault == "no_adapter":

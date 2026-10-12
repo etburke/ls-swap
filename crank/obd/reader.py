@@ -37,11 +37,18 @@ class ObdReadout:
     sim: bool = False
     read_at: str = ""
 
+    @property
+    def dtc_count(self) -> int:
+        return len(self.codes)
+
     def lines(self) -> list[str]:
         """Plain-language result lines for the UI."""
         sim = " (simulated)" if self.sim else ""
         codes = ", ".join(f"{c['code']} ({c['status']})" for c in self.codes)
-        out = [f"Codes{sim}: " + (codes or "none stored, pending or permanent")]
+        if not codes:
+            codes = ("no codes reported by the modes that were read" if self.unsupported_modes
+                     else "none stored, pending or permanent")
+        out = [f"Codes{sim}: " + codes]
         if self.mil_on is not None:
             out.append("Check engine light: " + ("on" if self.mil_on else "off"))
         got = [v for v in self.live if v.supported]
@@ -74,6 +81,7 @@ class ObdReader:
         return P.response_data(self._ask(P.request(mode, pid, frame)), mode, pid, frame)
 
     def read(self) -> ObdReadout:
+        self.raw = {}
         out = ObdReadout(sim=self.t.sim, read_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
         self.t.open()
         try:
@@ -91,10 +99,15 @@ class ObdReader:
                     supported |= P.supported_pids(base, data) if data else set()
             self._status(out)
             self._codes(out, can)
-            self._freeze(out, supported)
+            self._freeze(out)
             self._live(out, supported)
-        finally:
-            self.t.close()
+        except BaseException:
+            try:
+                self.t.close()
+            except Exception:                              # never mask the error that got us here
+                pass
+            raise
+        self.t.close()
         out.raw = self.raw
         return out
 
@@ -112,7 +125,7 @@ class ObdReader:
             for code in P.decode_dtcs(data or b"", can):
                 out.codes.append({"code": code, "status": status, "description": P.describe_dtc(code) or ""})
 
-    def _freeze(self, out: ObdReadout, supported: set) -> None:
+    def _freeze(self, out: ObdReadout) -> None:
         try:
             data = self._mode_data(0x02, 0x02, frame=True)
         except ObdNotSupported:

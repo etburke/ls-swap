@@ -71,7 +71,7 @@ def _quick_add(case, capture_ids):
             st.error(str(e))
 
 
-def _obd(case):
+def _obd():
     st.subheader("Read from the vehicle (OBD-II)")
     st.caption("Simulator only until an adapter is connected. A read adds the codes, freeze frame and "
                "live values to the case; it never clears codes.")
@@ -170,7 +170,7 @@ def render(ss):
     _vehicle(case)
     cap_ids = [c["id"] for c in case.session.list_captures()]
     _quick_add(case, cap_ids)
-    _obd(case)
+    _obd()
     snaps = [e.data["snapshot"] for e in events if e.type == "capture" and e.data.get("snapshot")]
     codes = [v["code"] for v in snaps[-1]["verdict"]] if snaps else []
     _board(case, codes)

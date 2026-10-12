@@ -68,7 +68,7 @@ class Controller:
     def read_obd(self, scenario: str = "healthy"):
         """One OBD read into the current case. Returns (readout, None) or (None, message).
 
-        Only the simulator exists so far; a real adapter plugs in as another Transport."""
+        Only the simulator is wired in; a real adapter plugs in as another Transport."""
         try:
             readout = ObdReader(SimTransport(scenario)).read()
         except ObdError as e:

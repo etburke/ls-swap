@@ -115,3 +115,55 @@ def test_busy_pcm_on_mode_03_fails_the_read_rather_than_marking_it_unsupported()
             return super().send(cmd, timeout)
     with pytest.raises(ObdProtocolError):
         ObdReader(Busy("healthy")).read()
+
+
+def test_raw_is_reset_between_reads():
+    reader = ObdReader(SimTransport("healthy"))
+    reader.read()
+    first = set(reader.raw)
+    reader.t.n = 0
+    r2 = reader.read()
+    assert set(r2.raw) == first and r2.raw is reader.raw
+
+
+def test_close_failure_does_not_mask_the_original_error():
+    t = SimTransport("drops_mid_read")
+
+    def boom():
+        raise OSError("port gone")
+    t.close = boom
+    with pytest.raises(ObdTimeout):
+        ObdReader(t).read()
+
+
+def test_close_failure_after_a_good_read_is_reported():
+    t = SimTransport("healthy")
+
+    def boom():
+        raise OSError("port gone")
+    t.close = boom
+    with pytest.raises(OSError):
+        ObdReader(t).read()
+
+
+def test_dtc_count_and_unread_modes_in_the_code_line():
+    assert read("many_codes").dtc_count == 5
+    r = read("limited_pcm")
+    r.codes = []
+    assert r.lines()[0] == "Codes (simulated): no codes reported by the modes that were read"
+    assert read("healthy").lines()[0] == "Codes (simulated): none stored, pending or permanent"
+
+
+def test_scenarios_are_not_shared_between_transports():
+    a = SimTransport("p2119_zero_rpm")
+    a.sc.stored.append("P0000")
+    assert SCENARIOS["p2119_zero_rpm"].stored == ["P2119"]
+    assert SimTransport("p2119_zero_rpm").sc.stored == ["P2119"]
+
+
+def test_no_data_on_the_first_request_asks_about_the_key():
+    class KeyOff(SimTransport):
+        def _obd(self, cmd):
+            return "NO DATA"
+    with pytest.raises(ObdProtocolError, match="Is the key on"):
+        ObdReader(KeyOff("healthy")).read()
