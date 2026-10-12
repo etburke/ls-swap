@@ -6,7 +6,11 @@ import socket
 import threading
 
 from .capture import CaptureJob
+from .case import Case
 from .model import CaptureSettings, Thresholds
+from .obd.errors import ObdError
+from .obd.reader import ObdReader
+from .obd.transport import SimTransport
 from .scope import RigolScope, SimScope
 from .store import SessionStore
 
@@ -49,10 +53,28 @@ class Controller:
             else:
                 return "Connect to the scope first (on the laptop)."
             sess = self.store.open(self.session_name)
-            self.job = CaptureJob(scope, self.settings, self.thresholds, poll_s=self.poll_s,
-                                  save=lambda d: sess.add_capture(d, label, note))
+            case = Case(sess)
+            self.job = CaptureJob(
+                scope, self.settings, self.thresholds, poll_s=self.poll_s,
+                save=lambda d: sess.add_capture(d, label, note),
+                on_done=lambda j: case.append_capture(j.saved_id, label, j.analysis,
+                                                      bool(j.data and j.data.meta.get("sim"))))
             self.job.start()
             return None
+
+    def case(self) -> Case:
+        return Case(self.store.open(self.session_name))
+
+    def read_obd(self, scenario: str = "healthy"):
+        """One OBD read into the current case. Returns (readout, None) or (None, message).
+
+        Only the simulator exists so far; a real adapter plugs in as another Transport."""
+        try:
+            readout = ObdReader(SimTransport(scenario)).read()
+        except ObdError as e:
+            return None, str(e)
+        self.case().append_obd(readout)
+        return readout, None
 
     def cancel(self) -> None:
         if self.job:

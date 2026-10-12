@@ -26,6 +26,28 @@ def render(ctrl):
         else:
             st.rerun()
 
+    with st.expander("Log something"):
+        note = st.text_input("What happened?", key="remote_note")
+        c1, c2 = st.columns(2)
+        for col, kind, key in ((c1, "observation", "remote_obs"), (c2, "change", "remote_change")):
+            if col.button(f"Add {kind}", key=key, use_container_width=True):
+                try:
+                    ctrl.case().append(kind, note)
+                    st.success(f"Added {kind}.")
+                except ValueError as e:
+                    st.error(str(e))
+
+    from crank.obd.transport import SCENARIOS
+    with st.expander("Read OBD (simulated)"):
+        scen = st.selectbox("Simulated vehicle", list(SCENARIOS), key="remote_obd_scenario")
+        if st.button("Read OBD", key="remote_obd", use_container_width=True):
+            readout, err = ctrl.read_obd(scen)
+            if err:
+                st.error(err)
+            else:
+                for line in readout.lines():
+                    st.write("- " + line)
+
     state = snap["state"]
     if snap["running"]:
         if state in ("armed", "triggered"):

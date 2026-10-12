@@ -75,3 +75,13 @@ def test_get_controller_is_a_shared_singleton(tmp_path, monkeypatch):
     ctl.reset_controller()
     assert ctl.get_controller() is ctl.get_controller()
     ctl.reset_controller()
+
+
+def test_arm_appends_a_capture_event_with_the_verdict_snapshot(c):
+    c.sync(mode="Simulator", scenario="ground_lift", session_name="bench")
+    c.arm("baseline")
+    _finish(c)
+    ev = [e for e in c.case().events() if e.type == "capture"]
+    assert len(ev) == 1 and ev[0].text == "baseline" and ev[0].data["sim"] is True
+    assert ev[0].data["snapshot"]["verdict"][0]["code"] == "ground_lift"
+    assert ev[0].refs["capture"] == c.snapshot()["saved_id"]
