@@ -79,3 +79,21 @@ def test_self_check_button_reports_each_setting(at):
     at.sidebar.button(key="self_check").click().run()
     assert not at.exception
     assert any("memory depth" in s.value for s in at.sidebar.success)
+
+
+def test_scope_buttons_are_locked_while_a_capture_runs(at):
+    from tests.test_scope import FakeVisa
+    from crank.capture import CaptureJob
+    from crank.model import CaptureSettings
+    from crank.scope import RigolScope, SimScope
+    job = CaptureJob(SimScope("healthy", fault="stuck_waiting"), CaptureSettings(wait=30), poll_s=0.01)
+    job.start()
+    try:
+        at.sidebar.radio(key="mode").set_value("Real scope").run()
+        at.session_state["scope"] = RigolScope(inst=FakeVisa())
+        at.session_state["job"] = job
+        at.sidebar.radio(key="page").set_value("Results").run()
+        assert at.sidebar.button(key="self_check").disabled
+        assert at.sidebar.button(key="connect").disabled
+    finally:
+        job.cancel(); job.join(5)

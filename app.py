@@ -45,11 +45,12 @@ def session():
 with st.sidebar:
     st.title("Crank Test Harness")
     mode = st.radio("Scope", ["Simulator", "Real scope"], key="mode")
+    job_busy = bool(ss.job and ss.job.running)
     if mode == "Simulator":
         st.selectbox("Scenario", SCENARIOS, key="scenario")
     else:
         st.text_input("VISA resource (blank = auto-detect)", key="resource")
-        if st.button("Connect", key="connect"):
+        if st.button("Connect", key="connect", disabled=job_busy):
             try:
                 if ss.scope:
                     ss.scope.close()
@@ -60,7 +61,7 @@ with st.sidebar:
                 st.error(str(e))
         if ss.scope:
             st.caption("Connected to a real scope.")
-            if st.button("Self-check settings", key="self_check"):
+            if st.button("Self-check settings", key="self_check", disabled=job_busy):
                 try:
                     for ok, line in ss.scope.self_check(ss.settings):
                         (st.success if ok else st.error)(line)
@@ -141,6 +142,9 @@ def page_capture():
         st.rerun()
     elif job.state == "done":
         st.success("Capture complete and saved.")
+        for line in getattr(job.scope, "log", []):
+            if line.startswith("WARNING"):
+                st.warning(line)
         st.button("View results", key="view_results", on_click=goto, args=("Results", job.saved_id))
     elif job.state in ("error", "cancelled"):
         (st.error if job.state == "error" else st.warning)(job.message)

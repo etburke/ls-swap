@@ -94,3 +94,25 @@ def test_self_check_passes_then_flags_a_clamped_setting():
     f.query = lambda c: "1M" if c == ":ACQuire:MDEPth?" else real_query(c)   # scope clamped the depth
     bad = [t for ok, t in sc.self_check(CaptureSettings()) if not ok]
     assert len(bad) == 1 and "memory depth" in bad[0]
+
+
+def test_depth_shortfall_warns_and_is_recorded_in_meta():
+    f = FakeVisa()
+    real_query = f.query
+    f.query = lambda c: "1M" if c == ":ACQuire:MDEPth?" else real_query(c)
+    s = RigolScope(inst=f)
+    cfg = CaptureSettings()
+    cfg.channels = cfg.channels[:1]
+    s.configure(cfg)
+    assert any(m.startswith("WARNING") and "memory depth" in m for m in s.log)
+    d = s.fetch(cfg)
+    assert d.meta["depth_requested"] == "10M" and d.meta["depth_reported"] == "1M"
+    assert d.meta["points"] == 300_000 and "srate" in d.meta
+    assert any(m.startswith("WARNING") and "points" in m for m in s.log)
+
+
+def test_log_is_cleared_on_each_configure():
+    s = RigolScope(inst=FakeVisa())
+    s.log.append("stale")
+    s.configure(CaptureSettings())
+    assert "stale" not in s.log

@@ -76,7 +76,7 @@ class CaptureJob:
             self._set("error", f"{type(e).__name__}: {e}")
 
     def _wait_for_trigger(self) -> bool:
-        t0, seen_armed = time.time(), False
+        t0, seen_armed, t_trig = time.time(), False, None
         while True:
             if self._cancel.is_set():
                 self.scope.disarm()
@@ -86,6 +86,7 @@ class CaptureJob:
             if st != "STOP":
                 seen_armed = True
                 if st == "TD":
+                    t_trig = t_trig or time.time()
                     self._set("triggered", "Trigger seen; recording.")
             elif seen_armed:
                 return True
@@ -93,7 +94,11 @@ class CaptureJob:
                 self._set("error", "The scope never armed after SINGLE (status stayed STOP). "
                                    "Check the SCPI log for rejected commands.")
                 return False
-            if time.time() - t0 > self.settings.wait:
+            if t_trig and time.time() - t_trig > self.settings.seconds + 10:
+                self.scope.disarm()
+                self._set("error", "The scope triggered but never finished recording.")
+                return False
+            if t_trig is None and time.time() - t0 > self.settings.wait:
                 self.scope.disarm()
                 self._set("error", "Timed out waiting for a trigger. Is CH1 crossing the "
                                    "trigger level while cranking?")

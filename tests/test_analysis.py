@@ -82,3 +82,36 @@ def test_custom_thresholds_for_different_wheel():
     th = Thresholds(teeth=24)
     a = analyze_capture(generate("healthy"), th)
     assert a.reports["ch1"].revs_good == 0          # 58x signal never matches 24 edges/rev
+
+
+# --- final-review fixes
+def _wipe_tooth(d, edge_no=300, width=200):
+    for ch in (1, 2):
+        v = d.channels[ch]
+        rises = np.flatnonzero((v[1:] > 2.5) & (v[:-1] <= 2.5))
+        v[rises[edge_no]:rises[edge_no] + width] = 0.0
+
+
+@pytest.mark.parametrize("n_teeth", [1, 3])
+def test_a_few_dropped_teeth_are_not_reported_clean(n_teeth):
+    d = generate("healthy")
+    for k in range(n_teeth):
+        _wipe_tooth(d, 300 + 40 * k)
+    a = analyze_capture(d)
+    assert "signal_clean" not in a.codes and "unexplained_dropouts" in a.codes
+
+
+def test_nan_in_supply_channel_does_not_hide_ref_sag():
+    d = generate("ref_sag")
+    d.channels[3] = d.channels[3].copy()
+    d.channels[3][150_000] = np.nan
+    a = analyze_capture(d)
+    assert "ref_sag" in a.codes and "bad_samples" in a.codes
+    assert "unexplained_dropouts" not in a.codes
+
+
+def test_nan_samples_prevent_a_clean_verdict():
+    d = generate("healthy")
+    d.channels[4] = d.channels[4].copy()
+    d.channels[4][100_000] = np.nan
+    assert analyze_capture(d).codes == {"bad_samples"}

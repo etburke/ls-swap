@@ -49,3 +49,19 @@ def test_analysis_crash_keeps_saved_data():
                    thresholds=object())          # breaks analysis on purpose
     j.start(); j.join(5)
     assert j.state == "error" and saved
+
+
+class ScriptedScope(SimScope):
+    def __init__(self, script):
+        super().__init__("healthy")
+        self.script = list(script)
+
+    def status(self):
+        return self.script.pop(0) if len(self.script) > 1 else self.script[0]
+
+
+def test_trigger_near_the_end_of_the_wait_is_not_killed():
+    sc = ScriptedScope(["WAIT"] * 2 + ["TD"] * 10 + ["STOP"])
+    j = CaptureJob(sc, CaptureSettings(wait=0.05, seconds=6.0), poll_s=0.02)
+    j.start(); j.join(10)
+    assert j.state == "done", j.message

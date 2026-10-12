@@ -134,13 +134,17 @@ def supply_stats(t: np.ndarray, chans: dict, th: Thresholds, window) -> dict:
     out: dict = {"window": window}
     if 3 in chans:
         v = chans[3][mask]
-        p1 = float(np.percentile(v, 1))
-        out.update(ref_p1=p1, ref_median=float(np.median(v)),
-                   ref_sag_mv=max(0.0, th.ref_nominal - p1) * 1000)
+        v = v[np.isfinite(v)]
+        if v.size:
+            p1 = float(np.percentile(v, 1))
+            out.update(ref_p1=p1, ref_median=float(np.median(v)),
+                       ref_sag_mv=max(0.0, th.ref_nominal - p1) * 1000)
     if 4 in chans:
         v = chans[4][mask]
-        p99 = float(np.percentile(np.abs(v), 99))
-        out.update(gnd_p99=p99, gnd_dev_mv=p99 * 1000)
+        v = v[np.isfinite(v)]
+        if v.size:
+            p99 = float(np.percentile(np.abs(v), 99))
+            out.update(gnd_p99=p99, gnd_dev_mv=p99 * 1000)
     return out
 
 
@@ -194,7 +198,8 @@ def build_findings(reports, supply, cmp, corr, th: Thresholds) -> list:
     ref_sag = supply.get("ref_sag_mv", 0.0) >= th.ref_sag_mv
     gnd_lift = supply.get("gnd_dev_mv", 0.0) >= th.ground_mv
     anomalous = any(r.usable and r.anomalies >= max(3, 0.01 * r.n_edges)
-                    for r in reports.values())
+                    for r in reports.values())          # many: severity "fail"
+    any_anomaly = any(r.usable and r.anomalies > 0 for r in reports.values())
     aligned = [c for c in corr if c["aligned"]]
     align_txt = (f" {len(aligned)} of {len(corr)} dropout events coincide with a supply/ground "
                  f"disturbance." if corr else "")
@@ -228,9 +233,9 @@ def build_findings(reports, supply, cmp, corr, th: Thresholds) -> list:
             f"PCM low reference deviates {supply['gnd_dev_mv']:.0f} mV from battery negative",
             "The PCM's ground lifts relative to the battery during cranking, so the signal it "
             "sees (CH1 - CH4) is shifted." + align_txt, gnd_dev_mv=supply["gnd_dev_mv"])
-    if usable and anomalous and not (ref_sag or gnd_lift):
+    if usable and any_anomaly and not (ref_sag or gnd_lift):
         worst = max(usable, key=lambda r: r.anomalies)
-        add("unexplained_dropouts", "fail",
+        add("unexplained_dropouts", "fail" if anomalous else "warn",
             "Dropouts or runt pulses with a steady supply and ground",
             f"{worst.label}: {worst.missing} missing-edge suspects, {worst.runt_hi} runt highs, "
             f"{worst.runt_lo} weak lows, {len(worst.bad_revs)} revolutions with the wrong edge "
@@ -265,4 +270,13 @@ def analyze_capture(data: CaptureData, th: Thresholds | None = None) -> Analysis
            if "ch1" in reports and "ch2" in reports else None)
     events = sorted(e for r in reports.values() for e in r.events)
     corr = correlate_events(t, ch, events, th)
-    return Analysis(reports, supply, cmp, corr, build_findings(reports, supply, cmp, corr, th))
+    findings = build_findings(reports, supply, cmp, corr, th)
+    bad = {n: int((~np.isfinite(v)).sum()) for n, v in ch.items() if not np.isfinite(v).all()}
+    if bad:
+        findings = [f for f in findings if f.code != "signal_clean"]
+        names = ", ".join(f"{data.labels.get(n, f'CH{n}')}: {c}" for n, c in sorted(bad.items()))
+        findings.append(Finding(
+            "bad_samples", "warn", "Capture contains invalid (NaN) samples",
+            f"Non-finite samples: {names}. Statistics skip them, but a bad download can hide "
+            f"real problems; re-capture before trusting a clean result.", {"counts": bad}))
+    return Analysis(reports, supply, cmp, corr, findings)

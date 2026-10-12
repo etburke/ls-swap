@@ -59,6 +59,7 @@ class RigolScope(ScopeInterface):
         if inst is None:
             inst = self._open(resource)
         self.i = inst
+        self._requested_depth, self._depth_reported, self._srate = "10M", "?", "?"
         self.i.timeout = 30000
         self.i.chunk_size = 1 << 20
 
@@ -109,6 +110,8 @@ class RigolScope(ScopeInterface):
         return self.q("*IDN?")
 
     def configure(self, s: CaptureSettings) -> None:
+        self.log.clear()
+        self._requested_depth = s.depth
         scale = s.seconds / 10.0                       # 10 horizontal divisions
         self.w(":STOP")
         self.w(":TIMebase:MODE MAIN")
@@ -118,8 +121,12 @@ class RigolScope(ScopeInterface):
         self.w(":ACQuire:TYPE NORMal")
         self.w(f":ACQuire:MDEPth {s.depth}")
         got = self.q(":ACQuire:MDEPth?")
+        self._depth_reported, self._srate = got, self.q(":ACQuire:SRATe?")
         self.log.append(f"Memory depth requested {s.depth}, scope reports {got}; "
-                        f"sample rate {self.q(':ACQuire:SRATe?')}")
+                        f"sample rate {self._srate}")
+        if _depth_value(got) != _depth_value(s.depth):
+            self.log.append(f"WARNING: memory depth is {got}, not the {s.depth} requested "
+                            f"(the scope may have clamped it for 4-channel mode).")
         for c in s.channels:
             self.w(f":CHANnel{c.n}:DISPlay {'ON' if c.enabled else 'OFF'}")
             if not c.enabled:
@@ -190,7 +197,15 @@ class RigolScope(ScopeInterface):
         if t is None:
             raise ScopeError("No channels enabled.")
         labels = {c.n: c.label for c in s.channels if c.enabled}
-        return CaptureData(t, channels, labels, {"sim": False, "idn": self.identify()})
+        points = len(t)
+        want = _depth_value(self._requested_depth)
+        if points < 0.9 * want:
+            self.log.append(f"WARNING: capture has {points} points, fewer than the {self._requested_depth} "
+                            f"requested; fine detail (runts) may be undersampled.")
+        meta = {"sim": False, "idn": self.identify(), "points": points,
+                "depth_requested": self._requested_depth,
+                "depth_reported": self._depth_reported, "srate": self._srate}
+        return CaptureData(t, channels, labels, meta)
 
     def _fetch_channel(self, ch: int, chunk: int):
         self.w(f":WAVeform:SOURce CHANnel{ch}")
