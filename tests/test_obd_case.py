@@ -99,3 +99,12 @@ def test_reports_escape_obd_text(case):
     r.codes[0]["description"] = "<script>alert(1)</script>"
     case.append_obd(r)
     assert "<script>" not in to_html(build_summary(case))
+
+
+def test_timeline_labels_simulated_measurements_only(case):
+    case.append_obd(read("p2119_zero_rpm"))
+    case.append("measurement", "", {"name": "Battery", "value": 12.4, "unit": "V"})
+    lines = [t["line"] for t in build_summary(case).timeline if t["type"] == "measurement"]
+    assert len(lines) > 1
+    for line in lines:
+        assert ("[SIMULATED]" in line) == (not line.startswith("Measured Battery"))

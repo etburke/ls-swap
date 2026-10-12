@@ -45,7 +45,8 @@ def describe(e: Event) -> str:
     if e.type == "measurement":
         where = f" ({d['where']})" if d.get("where") else ""
         cond = f", {d['conditions']}" if d.get("conditions") else ""
-        return f"Measured {d.get('name')}: {float(d.get('value')):g} {d.get('unit')}{where}{cond}"
+        sim = " [SIMULATED]" if d.get("sim") else ""
+        return f"Measured {d.get('name')}: {float(d.get('value')):g} {d.get('unit')}{where}{cond}{sim}"
     if e.type == "capture":
         snap = d.get("snapshot")
         sim = " [SIMULATED]" if d.get("sim") else ""
