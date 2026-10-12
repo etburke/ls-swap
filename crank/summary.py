@@ -44,7 +44,7 @@ def describe(e: Event) -> str:
     if e.type == "measurement":
         where = f" ({d['where']})" if d.get("where") else ""
         cond = f", {d['conditions']}" if d.get("conditions") else ""
-        return f"Measured {d.get('name')}: {d.get('value'):g} {d.get('unit')}{where}{cond}"
+        return f"Measured {d.get('name')}: {float(d.get('value')):g} {d.get('unit')}{where}{cond}"
     if e.type == "capture":
         snap = d.get("snapshot")
         sim = " [SIMULATED]" if d.get("sim") else ""
@@ -73,16 +73,22 @@ def build_summary(case: Case) -> Summary:
                "evidence": _evidence(e.refs)}
         {"ruled_out": s.ruled_out, "confirmed": s.confirmed}.get(e.data.get("status", "open"), s.open).append(row)
 
-    latest: dict[str, Event] = {}
+    latest: dict[tuple, Event] = {}
     for e in events:
         if e.type == "measurement":
-            latest[e.data.get("name", "")] = e
-    s.measurements = [dict(name=n, value=e.data["value"], unit=e.data.get("unit", ""),
+            key = (e.data.get("name", ""), e.data.get("where", ""), e.data.get("conditions", ""))
+            latest[key] = e
+    s.measurements = [dict(name=e.data.get("name", ""), value=e.data["value"], unit=e.data.get("unit", ""),
                            where=e.data.get("where", ""), conditions=e.data.get("conditions", ""))
-                      for n, e in latest.items()]
+                      for e in latest.values()]
 
-    reads = [e for e in events if e.type == "code_read"]
-    s.codes = list(reads[-1].data.get("codes", [])) if reads else []
+    codes: dict[str, dict] = {}                       # every code ever read, with its latest status
+    for e in events:
+        if e.type == "code_read":
+            for c in e.data.get("codes", []):
+                if isinstance(c, dict) and c.get("code"):
+                    codes[c["code"]] = c
+    s.codes = list(codes.values())
 
     caps = [e for e in events if e.type == "capture"]
     s.captures = [dict(id=e.refs.get("capture", ""), label=e.text, ts=e.ts,
@@ -93,19 +99,20 @@ def build_summary(case: Case) -> Summary:
         if e.type != "change":
             continue
         b, a = e.refs.get("before"), e.refs.get("after")
-        if not (b in by_id and a in by_id):             # no explicit link: nearest captures either side
+        inferred = not (b in by_id and a in by_id)
+        if inferred:                                    # no explicit link: nearest captures either side
             before = [c for j, c in enumerate(events) if j < i and c.type == "capture"]
             after = [c for j, c in enumerate(events) if j > i and c.type == "capture"]
             if not before or not after:
                 continue
             b, a = before[-1].refs.get("capture"), after[0].refs.get("capture")
-        s.before_after.append(dict(change=e.text, before=by_id[b], after=by_id[a]))
+        s.before_after.append(dict(change=e.text, before=by_id[b], after=by_id[a], inferred=inferred))
 
     have_step = {e.refs.get("step") for e in events if e.refs.get("step")}
     for step in STEPS:
         done = step.id in have_step
         if step.id == "baseline_capture":
-            done = done or bool(caps)
+            done = done or any(not c.data.get("sim") for c in caps)    # a simulator run is not a baseline
         elif step.id == "after_change":
             done = any(e.type == "change" for e in events)
         if not done:

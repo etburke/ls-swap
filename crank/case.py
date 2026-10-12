@@ -23,7 +23,7 @@ SUGGESTIONS = {
     "signal_clean": "PCM power, ground or calibration",
 }
 
-_lock = threading.Lock()
+_lock = threading.RLock()
 
 
 @dataclass
@@ -44,7 +44,16 @@ class Event:
     @classmethod
     def from_dict(cls, d: dict) -> "Event":
         known = {f.name for f in fields(cls)} - {"synth"}
-        return cls(**{k: v for k, v in d.items() if k in known})
+        d = {k: v for k, v in d.items() if k in known}
+        for k in ("id", "ts", "type"):
+            if not isinstance(d.get(k), str):
+                raise ValueError(f"event field {k} must be text")
+        if not isinstance(d.get("text", ""), str):
+            raise ValueError("event text must be text")
+        for k in ("data", "refs"):
+            if k in d and not isinstance(d[k], dict):
+                raise ValueError(f"event field {k} must be an object")
+        return cls(**d)
 
 
 @dataclass
@@ -73,7 +82,7 @@ def load_events(path: Path) -> tuple[list[Event], int]:
     """Read events.jsonl; damaged lines are skipped and counted."""
     events, skipped = [], 0
     try:
-        lines = path.read_text().splitlines()
+        lines = path.read_bytes().decode("utf-8", "replace").splitlines()
     except FileNotFoundError:
         return [], 0
     for line in lines:
@@ -94,7 +103,7 @@ def _validate(type_: str, text: str, data: dict) -> None:
         raise ValueError(f"unknown event type {type_!r}")
     if type_ == "measurement":
         try:
-            float(data["value"])
+            data["value"] = float(data["value"])
         except (KeyError, TypeError, ValueError):
             raise ValueError("a measurement needs a numeric value") from None
         if not str(data.get("unit", "")).strip():
@@ -120,14 +129,17 @@ def capture_snapshot(analysis) -> dict | None:
     if analysis is None:
         return None
     r = analysis.reports.get("ch1") or next(iter(analysis.reports.values()), None)
+    order = {"fail": 0, "warn": 1, "info": 2}
+    sag, gnd = analysis.supply.get("ref_sag_mv"), analysis.supply.get("gnd_dev_mv")
     return {
-        "verdict": [{"code": f.code, "severity": f.severity, "title": f.title} for f in analysis.findings],
+        "verdict": [{"code": f.code, "severity": f.severity, "title": f.title}
+                    for f in sorted(analysis.findings, key=lambda f: order[f.severity])],
         "edges": r.n_edges if r else None,
         "revs_good": r.revs_good if r else None,
         "revs": r.revs if r else None,
         "rpm": round(r.rpm_median) if r and r.rpm_median else None,
-        "ref_sag_mv": round(analysis.supply.get("ref_sag_mv", 0)),
-        "gnd_dev_mv": round(analysis.supply.get("gnd_dev_mv", 0)),
+        "ref_sag_mv": None if sag is None else round(sag),     # None = channel not captured
+        "gnd_dev_mv": None if gnd is None else round(gnd),
     }
 
 
@@ -168,8 +180,15 @@ class Case:
             nums = [int(e.id[1:]) for e in existing if e.id[:1] == "e" and e.id[1:].isdigit()]
             ev = Event(f"e{(max(nums) + 1) if nums else 1:04d}", time.strftime("%Y-%m-%dT%H:%M:%S"),
                        type_, text.strip(), data, refs)
+            lead = ""
+            try:
+                with open(self._events_path, "rb") as f:          # a crash can leave a partial last line
+                    f.seek(-1, 2)
+                    lead = "" if f.read(1) == b"\n" else "\n"
+            except OSError:
+                pass
             with open(self._events_path, "a") as f:
-                f.write(ev.to_json() + "\n")
+                f.write(lead + ev.to_json() + "\n")
         return ev
 
     def append_capture(self, capture_id: str, label: str, analysis, sim: bool) -> Event:
@@ -181,6 +200,8 @@ class Case:
         out = []
         for f in step.fields:
             v = values.get(f.key)
+            if v is None:                                  # left unset: nothing was measured
+                continue
             if f.kind == "number":
                 out.append(self.append("measurement", "", {
                     "name": f.label, "value": float(v), "unit": f.unit, "where": step.title,
@@ -203,9 +224,12 @@ class Case:
 
     def set_hypothesis(self, hid: str | None, title: str, status: str = "open",
                        reason: str = "", refs: dict | None = None) -> Event:
-        hid = hid or f"h{len(self.hypotheses()) + 1}"
-        return self.append("hypothesis", "", {"hid": hid, "title": title, "status": status,
-                                              "reason": reason}, refs)
+        with _lock:                                        # allocate the id and write as one step
+            if not hid:
+                nums = [int(h[1:]) for h in self.hypotheses() if h[:1] == "h" and h[1:].isdigit()]
+                hid = f"h{(max(nums) + 1) if nums else 1}"
+            return self.append("hypothesis", "", {"hid": hid, "title": title, "status": status,
+                                                  "reason": reason}, refs)
 
     # -- everything, including legacy files read as events
     def all_events(self) -> list[Event]:
@@ -229,6 +253,8 @@ class Case:
                 if f.key not in vals:
                     continue
                 v = vals[f.key]
+                if v is None:
+                    continue
                 if f.kind == "number":
                     extra.append(Event(f"legacy-{step.id}-{f.key}", "", "measurement", "",
                                        {"name": f.label, "value": v, "unit": f.unit,
@@ -243,7 +269,15 @@ class Case:
         notes = self.session.notes()
         if notes.strip():
             extra.append(Event("legacy-notes", "", "observation", notes.strip(), {}, {}, synth=True))
-        return sorted(real + extra, key=lambda e: (e.ts, e.id))
+        # real events keep log order; dated legacy items slot in by time, undated ones come first
+        undated = [x for x in extra if not x.ts]
+        dated = sorted((x for x in extra if x.ts), key=lambda x: x.ts)
+        merged, i = [], 0
+        for r in real:
+            while i < len(dated) and dated[i].ts <= r.ts:
+                merged.append(dated[i]); i += 1
+            merged.append(r)
+        return undated + merged + dated[i:]
 
 
 def suggest_hypotheses(codes, existing_titles=()) -> list[str]:

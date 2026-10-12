@@ -13,15 +13,34 @@ def _v(x) -> str:
     return NOT_RECORDED if x in (None, "") else str(x)
 
 
-def _cap_line(c: dict) -> str:
-    snap = c["snapshot"]
+def _cap_head(c: dict) -> str:
     sim = " (SIMULATED)" if c["sim"] else ""
+    return f"{c['id']} {c['label'] or 'unlabeled'}{sim}"
+
+
+def _cap_tail(c: dict) -> str:
+    snap = c["snapshot"]
     if not snap:
-        return f"{c['id']} {c['label'] or 'unlabeled'}{sim}: verdict {NOT_RECORDED}"
+        return f"verdict {NOT_RECORDED}"
     top = snap["verdict"][0]["title"] if snap.get("verdict") else NOT_RECORDED
     bits = [f"{snap['revs_good']}/{snap['revs']} good revolutions" if snap.get("revs") else None,
-            f"5V ref sag {snap['ref_sag_mv']} mV", f"ground deviation {snap['gnd_dev_mv']} mV"]
-    return f"{c['id']} {c['label'] or 'unlabeled'}{sim}: the harness reported \"{top}\" ({'; '.join(b for b in bits if b)})"
+            f"5V ref sag {snap['ref_sag_mv']} mV" if snap.get("ref_sag_mv") is not None
+            else f"5V ref sag {NOT_RECORDED}",
+            f"ground deviation {snap['gnd_dev_mv']} mV" if snap.get("gnd_dev_mv") is not None
+            else f"ground deviation {NOT_RECORDED}"]
+    return f"the harness reported \"{top}\" ({'; '.join(b for b in bits if b)})"
+
+
+def _cap_line(c: dict) -> str:
+    return f"{_cap_head(c)}: {_cap_tail(c)}"
+
+
+def _code(c: dict) -> str:
+    st_ = f" ({c['status']})" if c.get("status") else ""
+    return f"{c.get('code')}{st_} {c.get('description', '')}".strip()
+
+
+INFERRED = "(inferred from the order of events)"
 
 
 def to_markdown(s: Summary) -> str:
@@ -43,7 +62,7 @@ def to_markdown(s: Summary) -> str:
         out += ["", "## Confirmed"] + [f"- {r['title']}: {r['reason']}" for r in s.confirmed]
     out += ["", "## Key data"]
     if s.codes:
-        out.append("- Codes: " + ", ".join(f"{c.get('code')} {c.get('description', '')}".strip() for c in s.codes))
+        out.append("- Codes: " + ", ".join(_code(c) for c in s.codes))
     out += [f"- {m['name']}: {m['value']:g} {m['unit']}" + (f" ({m['where']})" if m["where"] else "") for m in s.measurements]
     out += [f"- Capture {_cap_line(c)}" for c in s.captures]
     if not (s.codes or s.measurements or s.captures):
@@ -51,7 +70,7 @@ def to_markdown(s: Summary) -> str:
     if s.before_after:
         out += ["", "## Before and after"]
         for b in s.before_after:
-            out += [f"- After \"{b['change']}\":", f"  - before: {_cap_line(b['before'])}", f"  - after: {_cap_line(b['after'])}"]
+            out += [f"- After \"{b['change']}\"{' ' + INFERRED if b['inferred'] else ''}:", f"  - before: {_cap_line(b['before'])}", f"  - after: {_cap_line(b['after'])}"]
     out += ["", "## Not yet tried"] + ([f"- {t}" for t in s.not_tried] or ["- all guided tests have data"])
     out += ["", "## Timeline"] + [f"- {t['ts'][:16].replace('T', ' ') or 'undated'}: {t['line']}" for t in s.timeline]
     if s.attachments:
@@ -105,7 +124,8 @@ def _li(items) -> str:
 
 def _cap_html(c: dict, svg: str = "") -> str:
     sim = ' <span class="sim">SIMULATED</span>' if c["sim"] else ""
-    return f'<div class="card"><b>{escape(c["id"])} {escape(c["label"] or "unlabeled")}</b>{sim}<br>{escape(_cap_line(c).split(": ", 1)[1])}{svg}</div>'
+    return (f'<div class="card"><b>{escape(c["id"])} {escape(c["label"] or "unlabeled")}</b>{sim}'
+            f'<br>{escape(_cap_tail(c))}{svg}</div>')
 
 
 def to_html(s: Summary, plots: dict | None = None) -> str:
@@ -129,13 +149,14 @@ def to_html(s: Summary, plots: dict | None = None) -> str:
             body.append("<h2>Confirmed</h2>" + _li(f"{e(r['title'])}: {e(r['reason'])}" for r in s.confirmed))
         data = []
         if s.codes:
-            data.append("Codes: " + e(", ".join(f"{c.get('code')} {c.get('description', '')}".strip() for c in s.codes)))
+            data.append("Codes: " + e(", ".join(_code(c) for c in s.codes)))
         data += [f"{e(m['name'])}: {m['value']:g} {e(m['unit'])}" for m in s.measurements]
         body.append("<h2>Key data</h2>" + (_li(data) or f"<p class='muted'>{NOT_RECORDED}</p>"))
         if s.captures:
             body.append('<div class="pair">' + "".join(_cap_html(c, plots.get(c["id"], "")) for c in s.captures) + "</div>")
         for b in s.before_after:
-            body.append(f"<h2>Before and after: {e(b['change'])}</h2><div class='pair'>"
+            body.append(f"<h2>Before and after: {e(b['change'])}"
+                        f"{' <span class=muted>' + INFERRED + '</span>' if b['inferred'] else ''}</h2><div class='pair'>"
                         f"{_cap_html(b['before'], plots.get(b['before']['id'], ''))}"
                         f"{_cap_html(b['after'], plots.get(b['after']['id'], ''))}</div>")
         body.append("<h2>Not yet tried</h2>" + (_li(e(t) for t in s.not_tried) or "<p class='muted'>all guided tests have data</p>"))

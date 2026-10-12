@@ -48,7 +48,7 @@ def test_latest_measurement_and_active_codes(case):
     case.append("code_read", "", {"codes": [{"code": "P0335", "status": "pending"}]})
     s = build_summary(case)
     assert [m["value"] for m in s.measurements] == [12.6]
-    assert [c["code"] for c in s.codes] == ["P0335"]
+    assert [c["code"] for c in s.codes] == ["P2119", "P0335"]      # every code read, in order of first read
 
 
 def test_not_yet_tried_shrinks_as_steps_get_data(case):
@@ -57,8 +57,9 @@ def test_not_yet_tried_shrinks_as_steps_get_data(case):
                                                 "gnd_block_chassis_ohm": 0.3, "gnd_batt_pcm_ohm": 0.5})
     _capture(case, "healthy", "baseline")
     left = build_summary(case).not_tried
-    assert all("Static baseline" not in t and "Baseline cranking" not in t for t in left)
+    assert all("Static baseline" not in t for t in left)
     assert any("Key on, engine off" in t for t in left)
+    assert any("Baseline cranking" in t for t in left)             # the only capture is simulated
 
 
 def test_before_after_only_when_a_change_separates_two_captures(case):
@@ -93,3 +94,37 @@ def test_skipped_log_lines_are_reported(case):
     with open(case.path / "events.jsonl", "a") as f:
         f.write("oops\n")
     assert build_summary(case).skipped_lines == 1
+
+
+# --- final-review fixes
+def test_measurements_are_kept_per_name_where_and_conditions(case):
+    case.append("measurement", "", {"name": "Battery", "value": 12.6, "unit": "V", "conditions": "key off"})
+    case.append("measurement", "", {"name": "Battery", "value": 9.8, "unit": "V", "conditions": "cranking"})
+    s = build_summary(case)
+    assert sorted((m["conditions"], m["value"]) for m in s.measurements) == [("cranking", 9.8), ("key off", 12.6)]
+
+
+def test_codes_from_all_reads_keep_their_status(case):
+    case.append("code_read", "", {"codes": [{"code": "P2119", "status": "history"}]})
+    case.append("code_read", "", {"codes": [{"code": "P0335", "status": "pending"},
+                                            {"code": "P2119", "status": "current"}]})
+    codes = {c["code"]: c["status"] for c in build_summary(case).codes}
+    assert codes == {"P2119": "current", "P0335": "pending"}
+
+
+def test_a_simulated_capture_does_not_count_as_the_baseline(case):
+    _capture(case, "healthy", "sim run")
+    assert any("Baseline cranking" in t for t in build_summary(case).not_tried)
+    real = generate("healthy", seconds=1.0)
+    cid = case.session.add_capture(real, "real")
+    case.append("capture", "real", {"snapshot": None, "sim": False}, {"capture": cid})
+    assert all("Baseline cranking" not in t for t in build_summary(case).not_tried)
+
+
+def test_inferred_pairs_are_flagged_and_explicit_ones_are_not(case):
+    a = _capture(case, "ref_sag", "A")
+    case.append("change", "inferred change")
+    b = _capture(case, "healthy", "B")
+    case.append("change", "explicit change", {}, {"before": a, "after": b})
+    pairs = {p["change"]: p["inferred"] for p in build_summary(case).before_after}
+    assert pairs == {"inferred change": True, "explicit change": False}

@@ -243,12 +243,13 @@ def page_guided():
                 key = f"f_{step.id}_{f.key}"
                 lab = f"{f.label} ({f.unit})" if f.unit else f.label
                 if f.kind == "bool":
-                    vals[f.key] = st.checkbox(lab, value=bool(prev.get(f.key, False)), key=key)
+                    sel = st.selectbox(lab, ["—", "yes", "no"], index={True: 1, False: 2}.get(prev.get(f.key), 0),
+                                       key=key)
+                    vals[f.key] = {"—": None, "yes": True, "no": False}[sel]
                 elif f.kind == "text":
                     vals[f.key] = st.text_area(lab, value=prev.get(f.key, ""), key=key)
                 else:
-                    vals[f.key] = st.number_input(lab, value=float(prev.get(f.key, 0.0)),
-                                                  format="%.3f", key=key)
+                    vals[f.key] = st.number_input(lab, value=prev.get(f.key), format="%.3f", key=key)
             if step.fields and st.button("Save step", key=f"save_{step.id}"):
                 sess.set_reading(step.id, vals)
                 Case(sess).log_guided_step(step, vals)

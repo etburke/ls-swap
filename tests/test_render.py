@@ -63,3 +63,35 @@ def test_capture_svg_handles_missing_channels():
     d = generate("healthy", seconds=1.0)
     d.channels = {2: d.channels[2]}
     assert capture_svg(d) == ""
+
+
+# --- final-review fixes
+def test_missing_supply_numbers_read_not_recorded_never_zero(tmp_path):
+    case = Case(SessionStore(tmp_path).open("c"))
+    case.append("capture", "baseline", {"sim": False, "snapshot": {
+        "verdict": [{"code": "x", "severity": "info", "title": "Crank signal looks clean"}],
+        "edges": 10, "revs_good": 1, "revs": 1, "rpm": 200, "ref_sag_mv": None, "gnd_dev_mv": None}},
+        {"capture": "001"})
+    s = build_summary(case)
+    md, html = to_markdown(s), to_html(s)
+    assert "5V ref sag not recorded" in md and "ground deviation not recorded" in md
+    assert "sag 0 mV" not in md and "deviation 0 mV" not in md and "not recorded" in html
+
+
+def test_labels_containing_a_colon_stay_intact_in_html(tmp_path):
+    case = Case(SessionStore(tmp_path).open("c"))
+    case.append("capture", "after swap: new sensor", {"sim": True, "snapshot": None}, {"capture": "001"})
+    html = to_html(build_summary(case))
+    assert "<b>001 after swap: new sensor</b>" in html and "SIMULATED" in html
+    assert "new sensor (SIMULATED)" not in html           # the label must not leak into the tail
+
+
+def test_code_status_and_inferred_pairs_are_shown(tmp_path):
+    case = Case(SessionStore(tmp_path).open("c"))
+    case.append("code_read", "", {"codes": [{"code": "P0335", "status": "pending"}]})
+    for lab in ("A", "B"):
+        if lab == "B":
+            case.append("change", "swapped sensor")
+        case.append("capture", lab, {"sim": False, "snapshot": None}, {"capture": lab})
+    md = to_markdown(build_summary(case))
+    assert "P0335 (pending)" in md and "(inferred from the order of events)" in md

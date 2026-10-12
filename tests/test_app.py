@@ -238,7 +238,7 @@ def test_capture_and_guided_steps_reach_the_case_log(at):
     _go(at, "Guided tests")
     at.number_input(key="f_static_battery_v").set_value(12.6).run()
     at.button(key="save_static").click().run()
-    assert [e.type for e in _case().events()].count("measurement") == 4
+    assert [e.type for e in _case().events()].count("measurement") == 1     # only the field that was filled
 
 
 def test_results_can_log_the_verdict_as_an_observation(at):
@@ -274,3 +274,27 @@ def test_phone_quick_add_logs_observation_and_change(at):
     r.text_input(key="remote_note").set_value("").run()
     r.button(key="remote_obs").click().run()
     assert any("needs some text" in e.value for e in r.error)
+
+
+def test_guided_step_saved_with_one_field_logs_one_measurement(at):
+    _go(at, "Guided tests")
+    at.number_input(key="f_static_battery_v").set_value(12.6).run()
+    at.button(key="save_static").click().run()
+    assert [e.data["name"] for e in _case().events() if e.type == "measurement"] == ["Battery voltage"]
+
+
+def test_quick_add_measurement_needs_a_value(at):
+    at.selectbox(key="qa_type").select("measurement").run()
+    at.text_input(key="qa_mname_0").set_value("Battery").run()
+    at.text_input(key="qa_munit_0").set_value("V").run()
+    at.button(key="qa_add").click().run()
+    assert any("numeric value" in e.value for e in at.error) and _case().events() == []
+
+
+def test_a_report_goes_stale_when_the_case_changes(at):
+    _case().append("symptom", "stalls")
+    at.button(key="gen_report").click().run()
+    assert not any("out of date" in w.value for w in at.warning)
+    _case().append("observation", "new info")
+    at.run()
+    assert any("out of date" in w.value for w in at.warning)

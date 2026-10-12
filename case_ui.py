@@ -51,7 +51,7 @@ def _quick_add(case, capture_ids):
     elif kind == "measurement":
         c1, c2, c3 = st.columns(3)
         data["name"] = c1.text_input("What was measured", key=f"qa_mname_{n}")
-        data["value"] = c2.number_input("Value", value=0.0, format="%.3f", key=f"qa_mval_{n}")
+        data["value"] = c2.number_input("Value", value=None, format="%.3f", key=f"qa_mval_{n}")
         data["unit"] = c3.text_input("Unit", key=f"qa_munit_{n}")
         data["where"] = st.text_input("Where", key=f"qa_mwhere_{n}")
         data["conditions"] = st.text_input("Conditions (key off, cranking, hot)", key=f"qa_mcond_{n}")
@@ -111,6 +111,11 @@ def _timeline(case, events):
             st.markdown(f"`{e.ts[:16].replace('T', ' ') or 'undated'}` {describe(e)}")
 
 
+def _signature(case):
+    """Changes whenever the event log or the vehicle profile changes."""
+    return (len(case.all_events()), tuple(asdict(case.vehicle()).values()))
+
+
 def _report(case):
     ss = st.session_state
     st.subheader("Hand-off report")
@@ -124,10 +129,13 @@ def _report(case):
                     plots[cid] = capture_svg(case.session.load_capture(cid))
                 except Exception:
                     pass
-        ss["report"] = (case.name, to_markdown(s), to_html(s, plots), s.not_tried, s.empty)
+        ss["report"] = (case.name, to_markdown(s), to_html(s, plots), s.not_tried, s.empty, _signature(case))
     rep = ss.get("report")
     if rep and rep[0] == case.name:
-        _, md, html, not_tried, empty = rep
+        _, md, html, not_tried, empty, sig = rep
+        if sig != _signature(case):
+            st.warning("The case has changed since this report was generated. It is out of date: "
+                       "generate it again before sending it.")
         if empty:
             st.warning("Nothing has been recorded for this case yet, so the report is empty.")
         elif not_tried:

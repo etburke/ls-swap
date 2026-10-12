@@ -128,3 +128,113 @@ def test_capture_snapshot_freezes_verdict():
 def test_suggestions_skip_existing_and_unknown_codes():
     s = suggest_hypotheses(["ref_sag", "mystery", "ground_lift"], ["5V reference circuit and anything sharing it"])
     assert s == ["PCM ground path under load"]
+
+
+# --- final-review fixes
+def test_non_utf8_bytes_do_not_crash_the_case(case):
+    case.append("symptom", "one")
+    with open(case.path / "events.jsonl", "ab") as f:
+        f.write(b'{"id":"e0002","ts":"t","type":"symptom","text":"caf\xe9"}\n\xff\xfe garbage\n')
+    case.append("symptom", "two")
+    assert [e.text for e in case.events() if e.text in ("one", "two")] == ["one", "two"]
+    assert case.skipped >= 1
+
+
+def test_append_after_a_truncated_tail_keeps_the_new_event(case):
+    case.append("symptom", "one")
+    with open(case.path / "events.jsonl", "a") as f:
+        f.write('{"id":"e0002","ts":"2026-01-01T00:00:00","ty')      # crash mid-write, no newline
+    case.append("symptom", "two")
+    assert [e.text for e in case.events()] == ["one", "two"] and case.skipped == 1
+
+
+def test_hypothesis_ids_stay_unique_under_concurrency(case):
+    def work():
+        for _ in range(10):
+            case.set_hypothesis(None, "suspect")
+    ts = [threading.Thread(target=work) for _ in range(4)]
+    [t.start() for t in ts]; [t.join() for t in ts]
+    assert len(case.hypotheses()) == 40
+
+
+def test_hypothesis_ids_are_not_reused_after_a_damaged_line(case):
+    case.set_hypothesis(None, "a")                      # h1
+    case.set_hypothesis(None, "b")                      # h2
+    case.set_hypothesis(None, "c")                      # h3
+    lines = (case.path / "events.jsonl").read_text().splitlines()
+    (case.path / "events.jsonl").write_text(lines[0] + "\ngarbage\n" + lines[2] + "\n")   # h2 lost
+    new = case.set_hypothesis(None, "d")
+    assert new.data["hid"] == "h4" and len(case.hypotheses()) == 3
+
+
+def test_log_order_is_file_order_even_when_timestamps_disagree(case):
+    rows = [("e0001", "2026-11-02T01:30:00", "ruled_out"), ("e0002", "2026-11-02T01:10:00", "confirmed")]
+    (case.path / "events.jsonl").write_text("".join(json.dumps(
+        {"id": i, "ts": ts, "type": "hypothesis", "data": {"hid": "h1", "title": "t", "status": s,
+                                                           "reason": "r"}}) + "\n" for i, ts, s in rows))
+    assert [e.id for e in case.all_events()] == ["e0001", "e0002"]
+    assert case.hypotheses()["h1"].data["status"] == "confirmed"       # the later line wins
+
+
+def test_legacy_items_are_placed_by_time_and_undated_ones_come_first(tmp_path):
+    from crank.sim import generate
+    ses = SessionStore(tmp_path).open("old")
+    c = Case(ses)
+    early = ses.add_capture(generate("healthy", seconds=1.0), "early")
+    late = ses.add_capture(generate("healthy", seconds=1.0), "late")
+    for cid, when in ((early, "2026-10-11 09:00:00"), (late, "2026-10-11 11:00:00")):
+        meta = json.loads((ses.path / "captures" / f"{cid}.json").read_text())
+        meta["time"] = when
+        (ses.path / "captures" / f"{cid}.json").write_text(json.dumps(meta))
+    ses.set_notes("old notes")
+    (ses.path / "events.jsonl").write_text(json.dumps(
+        {"id": "e0001", "ts": "2026-10-11T10:00:00", "type": "symptom", "text": "noon-ish"}) + "\n")
+    texts = [e.text for e in c.all_events()]
+    assert texts == ["old notes", "early", "noon-ish", "late"]
+
+
+def test_malformed_field_types_are_skipped_not_fatal(case):
+    case.append("symptom", "ok")
+    with open(case.path / "events.jsonl", "a") as f:
+        f.write('{"id": 5, "ts": "t", "type": "symptom"}\n')
+        f.write('{"id": "e0009", "ts": "t", "type": "symptom", "data": null}\n')
+        f.write('{"id": "e0010", "ts": "t", "type": "symptom", "refs": "x"}\n')
+    case.append("symptom", "after")
+    assert [e.text for e in case.events()] == ["ok", "after"] and case.skipped == 3
+
+
+def test_measurement_value_is_stored_as_a_number(case):
+    e = case.append("measurement", "", {"name": "V", "value": "12.6", "unit": "V"})
+    assert e.data["value"] == 12.6 and isinstance(case.events()[0].data["value"], float)
+
+
+def test_snapshot_orders_the_verdict_by_severity_and_marks_absent_supply_as_none():
+    from crank.analysis import analyze_capture
+    from crank.sim import generate
+    d = generate("healthy")
+    d.channels[1] = d.channels[1].copy()
+    d.channels[1][1000] = float("nan")                  # adds a "warn" finding last
+    snap = capture_snapshot(analyze_capture(d))
+    assert [v["severity"] for v in snap["verdict"]][0] in ("fail", "warn")
+    sev = [v["severity"] for v in snap["verdict"]]
+    assert sev == sorted(sev, key=lambda s: {"fail": 0, "warn": 1, "info": 2}[s])
+    d2 = generate("healthy")
+    d2.channels = {1: d2.channels[1], 2: d2.channels[2]}
+    s2 = capture_snapshot(analyze_capture(d2))
+    assert s2["ref_sag_mv"] is None and s2["gnd_dev_mv"] is None
+
+
+def test_guided_step_skips_fields_left_unset(case):
+    case.log_guided_step(step_by_id("static"), {"battery_v": 12.6, "gnd_batt_block_ohm": None,
+                                                "gnd_block_chassis_ohm": None, "gnd_batt_pcm_ohm": None})
+    case.log_guided_step(step_by_id("mechanical"), {"sensor_mount_ok": None, "reluctor_ok": False,
+                                                    "balancer_ok": None, "notes": ""})
+    assert [e.data["name"] for e in case.events() if e.type == "measurement"] == ["Battery voltage"]
+    assert [e.text for e in case.events() if e.type == "observation"] == \
+        ["Reluctor wheel clean and undamaged: no"]
+
+
+def test_legacy_readings_left_unset_are_not_synthesized(tmp_path):
+    ses = SessionStore(tmp_path).open("old")
+    ses.set_reading("static", {"battery_v": 12.6, "gnd_batt_block_ohm": None})
+    assert [e.data["name"] for e in Case(ses).all_events()] == ["Battery voltage"]
