@@ -18,10 +18,12 @@ class CaptureJob:
     def __init__(self, scope: ScopeInterface, settings: CaptureSettings,
                  thresholds: Thresholds | None = None,
                  save: Callable[[CaptureData], object] | None = None,
-                 poll_s: float = 0.2, never_armed_s: float = 3.0):
+                 poll_s: float = 0.2, never_armed_s: float = 3.0,
+                 on_done: Callable[["CaptureJob"], None] | None = None):
         self.scope, self.settings = scope, settings
         self.thresholds = thresholds or Thresholds()
         self.save, self.poll_s, self.never_armed_s = save, poll_s, never_armed_s
+        self.on_done, self.hook_error, self._notified = on_done, "", False
         self.state, self.message = "idle", ""
         self.data: CaptureData | None = None
         self.analysis: Analysis | None = None
@@ -69,11 +71,22 @@ class CaptureJob:
                 self.saved_id = self.save(self.data)  # on disk before analysis can fail
             self._set("analyzing")
             self.analysis = analyze_capture(self.data, self.thresholds)
+            self._notify()
             self._set("done")
         except ScopeError as e:
             self._set("error", str(e))
         except Exception as e:                        # analysis or storage bug: data is kept
             self._set("error", f"{type(e).__name__}: {e}")
+        finally:
+            self._notify()                            # a saved capture always reaches the case log
+
+    def _notify(self) -> None:
+        if self.on_done and self.saved_id is not None and not self._notified:
+            self._notified = True
+            try:
+                self.on_done(self)
+            except Exception as e:                    # logging must never break a capture
+                self.hook_error = f"{type(e).__name__}: {e}"
 
     def _wait_for_trigger(self) -> bool:
         t0, seen_armed, t_trig = time.time(), False, None

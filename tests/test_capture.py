@@ -65,3 +65,35 @@ def test_trigger_near_the_end_of_the_wait_is_not_killed():
     j = CaptureJob(sc, CaptureSettings(wait=0.05, seconds=6.0), poll_s=0.02)
     j.start(); j.join(10)
     assert j.state == "done", j.message
+
+
+def test_on_done_runs_after_analysis_with_the_saved_id():
+    seen = []
+    j = CaptureJob(SimScope("ref_sag"), CaptureSettings(), poll_s=0.0, save=lambda d: "007",
+                   on_done=lambda job: seen.append((job.saved_id, job.analysis.codes)))
+    j.start(); j.join(5)
+    assert seen == [("007", {"ref_sag"})] and j.state == "done"
+
+
+def test_on_done_still_runs_when_analysis_fails_after_a_save():
+    seen = []
+    j = CaptureJob(SimScope("healthy"), CaptureSettings(), poll_s=0.0, save=lambda d: "001",
+                   thresholds=object(), on_done=lambda job: seen.append(job.analysis))
+    j.start(); j.join(5)
+    assert j.state == "error" and seen == [None]
+
+
+def test_a_failing_hook_never_breaks_the_capture():
+    def boom(job):
+        raise RuntimeError("log full")
+    j = CaptureJob(SimScope("healthy"), CaptureSettings(), poll_s=0.0, save=lambda d: "001", on_done=boom)
+    j.start(); j.join(5)
+    assert j.state == "done" and "log full" in j.hook_error
+
+
+def test_no_hook_call_when_nothing_was_saved():
+    seen = []
+    j = CaptureJob(SimScope("healthy", fault="fetch_error"), CaptureSettings(), poll_s=0.0,
+                   save=lambda d: "001", on_done=seen.append)
+    j.start(); j.join(5)
+    assert j.state == "error" and seen == []

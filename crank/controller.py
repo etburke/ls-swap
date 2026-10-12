@@ -6,6 +6,7 @@ import socket
 import threading
 
 from .capture import CaptureJob
+from .case import Case
 from .model import CaptureSettings, Thresholds
 from .scope import RigolScope, SimScope
 from .store import SessionStore
@@ -49,10 +50,17 @@ class Controller:
             else:
                 return "Connect to the scope first (on the laptop)."
             sess = self.store.open(self.session_name)
-            self.job = CaptureJob(scope, self.settings, self.thresholds, poll_s=self.poll_s,
-                                  save=lambda d: sess.add_capture(d, label, note))
+            case = Case(sess)
+            self.job = CaptureJob(
+                scope, self.settings, self.thresholds, poll_s=self.poll_s,
+                save=lambda d: sess.add_capture(d, label, note),
+                on_done=lambda j: case.append_capture(j.saved_id, label, j.analysis,
+                                                      bool(j.data and j.data.meta.get("sim"))))
             self.job.start()
             return None
+
+    def case(self) -> Case:
+        return Case(self.store.open(self.session_name))
 
     def cancel(self) -> None:
         if self.job:
