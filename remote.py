@@ -1,0 +1,50 @@
+"""Phone remote page (open the app with ?page=remote). Drives the same capture as the laptop."""
+import os
+import time
+
+import streamlit as st
+
+ICON = {"fail": "🔴", "warn": "🟠", "info": "🟢"}
+BIG_BUTTONS = """<style>
+div.stButton > button { height: 5rem; font-size: 1.6rem; }
+</style>"""
+
+
+def render(ctrl):
+    st.markdown(BIG_BUTTONS, unsafe_allow_html=True)
+    st.title("Crank remote")
+    snap = ctrl.snapshot()
+    what = snap["scenario"] if snap["mode"] == "Simulator" else "real scope"
+    st.caption(f"{snap['mode']}: {what} · session {snap['session_name']}")
+
+    label = st.text_input("What changed? (label)", key="remote_label")
+    if st.button("ARM", key="remote_arm", type="primary", use_container_width=True,
+                 disabled=snap["running"]):
+        err = ctrl.arm(label)
+        if err:
+            st.error(err)
+        else:
+            st.rerun()
+
+    state = snap["state"]
+    if snap["running"]:
+        if state in ("armed", "triggered"):
+            st.warning(f"**ARMED: crank the engine now.**\n\n{state}, "
+                       f"{snap['seconds_left']:.0f} s left to trigger")
+        else:
+            st.info(f"{state}...")
+        if st.button("Cancel", key="remote_cancel", use_container_width=True):
+            ctrl.cancel()
+        refresh = float(os.environ.get("CRANK_REMOTE_REFRESH_S", "1"))
+        if refresh > 0:                       # tests set 0 to render once instead of polling
+            time.sleep(refresh)
+            st.rerun()
+    elif state == "done":
+        st.success(f"Saved as capture {snap['saved_id']}.")
+        for w in snap["warnings"]:
+            st.warning(w)
+        for f in snap["findings"]:
+            st.markdown(f"{ICON[f['severity']]} **{f['title']}**")
+        st.caption("Full plots are on the laptop's Results page.")
+    elif state in ("error", "cancelled"):
+        (st.error if state == "error" else st.warning)(snap["message"])

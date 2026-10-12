@@ -24,6 +24,15 @@ Diagnoses a 0-RPM-while-cranking symptom on a Gen IV LS (58x crank) by capturing
 4. Run the Guided tests, then arm on the Capture page and crank.
 5. Check on the scope screen that the trigger point sits near the left edge of the capture.
 
+## Phone remote
+
+`.streamlit/config.toml` makes the app listen on the network. The laptop sidebar shows the phone URL,
+for example `http://192.168.1.20:8765/?page=remote`. Open it on a phone on the same Wi-Fi: big ARM and
+Cancel buttons, a live "crank now" banner, and the verdict when the capture finishes. The phone arms
+with whatever scope mode, scenario, session and settings the laptop currently has.
+There is no password: anyone on the network who finds the URL can arm the scope and browse captures.
+In Real-scope mode, click Connect on the laptop first.
+
 ## Not verified against real hardware yet
 
 - The SCPI command strings (written from memory of the DHO800 programming guide).
