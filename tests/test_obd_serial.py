@@ -125,3 +125,36 @@ def test_full_obd_read_through_serial_transport():
     out = ObdReader(make(f)).read()
     assert out.codes[0]["code"] == "P2119" and not out.sim
     assert f.closed
+
+
+from types import SimpleNamespace
+
+from crank.obd.serial_transport import list_ports, resolve_port
+
+
+def _ports(*devices):
+    return lambda: [SimpleNamespace(device=d, description="x") for d in devices]
+
+
+def test_list_ports_keeps_only_adapter_looking_ports():
+    cp = _ports("/dev/cu.OBDLinkMXPlus", "/dev/cu.Bluetooth-Incoming-Port", "/dev/cu.usbserial-110",
+                "/dev/tty.OBDLinkMXPlus", "/dev/cu.MyOBDII")
+    assert [p for _, p in list_ports(cp)] == ["/dev/cu.OBDLinkMXPlus", "/dev/cu.usbserial-110",
+                                              "/dev/cu.MyOBDII"]
+
+
+def test_resolve_auto_with_one_match():
+    assert resolve_port("auto", _ports("/dev/cu.OBDLinkMXPlus")) == "/dev/cu.OBDLinkMXPlus"
+
+
+def test_resolve_auto_with_none_or_several_lists_candidates():
+    with pytest.raises(ObdNoAdapter) as none:
+        resolve_port("auto", _ports("/dev/cu.Bluetooth-Incoming-Port"))
+    assert "paired" in str(none.value)
+    with pytest.raises(ObdNoAdapter) as many:
+        resolve_port("auto", _ports("/dev/cu.OBDLinkA", "/dev/cu.OBDLinkB"))
+    assert "/dev/cu.OBDLinkA" in str(many.value) and "/dev/cu.OBDLinkB" in str(many.value)
+
+
+def test_resolve_explicit_path_is_used_as_is():
+    assert resolve_port("/dev/cu.whatever", _ports()) == "/dev/cu.whatever"

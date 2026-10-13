@@ -2,6 +2,7 @@
 macOS serial port). Every command goes through the read-only allowlist before it touches the port."""
 from __future__ import annotations
 
+import fnmatch
 import threading
 import time
 
@@ -70,3 +71,32 @@ class SerialTransport(Transport):
                 ser.close()
             except OSError:
                 pass
+
+
+ADAPTER_GLOBS = ("/dev/cu.OBDLink*", "/dev/cu.*OBD*", "/dev/cu.usbserial*")
+
+
+def _comports():
+    from serial.tools import list_ports as lp          # lazy, like the transport
+    return lp.comports()
+
+
+def list_ports(comports=None) -> list[tuple[str, str]]:
+    """(label, path) for serial ports that look like OBD adapters."""
+    out = []
+    for p in (comports or _comports)():
+        if any(fnmatch.fnmatch(p.device, g) for g in ADAPTER_GLOBS):
+            out.append((f"{p.device} ({p.description})", p.device))
+    return out
+
+
+def resolve_port(port: str, comports=None) -> str:
+    """'auto' picks the only adapter-looking port; anything else is taken as a path."""
+    if port != "auto":
+        return port
+    found = [path for _, path in list_ports(comports)]
+    if len(found) == 1:
+        return found[0]
+    if not found:
+        raise ObdNoAdapter("No OBD adapter port found. Make sure the adapter is paired in Bluetooth settings, then refresh.")
+    raise ObdNoAdapter("More than one possible adapter port: " + ", ".join(found) + ". Choose one.")
