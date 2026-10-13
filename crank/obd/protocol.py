@@ -21,6 +21,14 @@ def _lines(resp: str) -> list[str]:
     return out
 
 
+def _raise_adapter_errors(lines: list[str]) -> None:
+    for line in lines:
+        if line == "?":
+            raise ObdProtocolError("The adapter did not understand the command.")
+        if any(line.startswith(e) for e in ERRORS):
+            raise ObdProtocolError(f"The adapter reported: {line.title()}.")
+
+
 def messages(resp: str) -> list[bytes] | None:
     """Reassemble the ECU messages in a response. None means 'NO DATA'.
 
@@ -29,11 +37,7 @@ def messages(resp: str) -> list[bytes] | None:
     lines = _lines(resp)
     if not lines or lines == ["NO DATA"]:
         return None
-    for line in lines:
-        if line == "?":
-            raise ObdProtocolError("The adapter did not understand the command.")
-        if any(line.startswith(e) for e in ERRORS):
-            raise ObdProtocolError(f"The adapter reported: {line.title()}.")
+    _raise_adapter_errors(lines)
     msgs, i = [], 0
     while i < len(lines):
         line = lines[i]
@@ -129,3 +133,81 @@ def is_can(protocol_text: str) -> bool:
     """ATDPN reply such as 'A6' or '6': protocols 6-9 are CAN."""
     t = protocol_text.strip().upper().lstrip("A")
     return t[:1] in ("6", "7", "8", "9")
+
+
+_HEADER_HELP = ("Unsupported reply format from the adapter: only 11-bit CAN (headers 7E8-7EF) is supported "
+                "(got {line!r}).")
+
+
+def ecu_messages(resp: str) -> dict[str, bytes] | None:
+    """Headers-on CAN text -> {ecu header: reassembled message}. None means 'NO DATA'.
+
+    Each line is one raw 11-bit CAN frame (three hex digits of header, then up to 8 data bytes, spaces
+    optional). ISO-TP single, first and consecutive frames are reassembled per ECU, so replies from
+    several ECUs may interleave."""
+    lines = _lines(resp)
+    if not lines or lines == ["NO DATA"]:
+        return None
+    _raise_adapter_errors(lines)
+    done: dict[str, bytes] = {}
+    partial: dict[str, dict] = {}                     # ecu -> {"want", "buf", "next"}
+    for line in lines:
+        flat = line.replace(" ", "")
+        if not _HEX.match(flat):
+            raise ObdProtocolError(f"Unreadable response from the adapter: {line[:24]!r}.")
+        if not flat.startswith("7"):
+            raise ObdProtocolError(_HEADER_HELP.format(line=line[:24]))
+        if len(flat) % 2 == 0 or not 5 <= len(flat) <= 19:      # 3 header digits + 1 to 8 whole bytes
+            raise ObdProtocolError(f"Unreadable response from the adapter: {line[:24]!r}.")
+        ecu, data = flat[:3], bytes.fromhex(flat[3:])
+        kind = data[0] >> 4
+        if kind == 0:
+            n = data[0] & 0xF
+            if n == 0 or len(data) - 1 < n:
+                raise ObdProtocolError(f"Incomplete reply from {ecu}.")
+            done.setdefault(ecu, data[1:1 + n])
+        elif kind == 1:
+            if len(data) < 3:
+                raise ObdProtocolError(f"Incomplete reply from {ecu}.")
+            partial[ecu] = {"want": ((data[0] & 0xF) << 8) | data[1], "buf": bytearray(data[2:]), "next": 1}
+        elif kind == 2:
+            p = partial.get(ecu)
+            if p is None or (data[0] & 0xF) != p["next"] % 16:
+                raise ObdProtocolError(f"Incomplete reply from {ecu}: a frame is missing or out of order.")
+            p["buf"] += data[1:]
+            p["next"] += 1
+            if len(p["buf"]) >= p["want"]:
+                done.setdefault(ecu, bytes(p["buf"][:p["want"]]))
+                del partial[ecu]
+        else:
+            raise ObdProtocolError(f"Unexpected frame type from {ecu}: {data[0]:02X}.")
+    if partial:
+        raise ObdProtocolError(f"Incomplete reply from {sorted(partial)[0]}: a frame is missing.")
+    return done
+
+
+def response_data_by_ecu(resp: str, mode: int, pid: int | None = None, frame: bool = False):
+    """({ecu: data bytes answering this request}, [ecus that said 'not supported']), or None for NO DATA."""
+    msgs = ecu_messages(resp)
+    if msgs is None:
+        return None
+    head = bytes([mode + 0x40] + ([pid] if pid is not None else []) + ([0] if frame else []))
+    data, unsupported = {}, []
+    for ecu, m in msgs.items():
+        if m.startswith(head):
+            data[ecu] = m[len(head):]
+        elif len(m) >= 3 and m[0] == 0x7F and m[1] == mode:
+            if m[2] in _NOT_SUPPORTED_NRC:
+                unsupported.append(ecu)
+            else:
+                what = _NRC_TEXT.get(m[2], "an error")
+                raise ObdProtocolError(f"{ecu} answered '{what}' (negative response {m[2]:02X}) to mode "
+                                       f"{mode:02X}; try again.")
+        else:
+            raise ObdProtocolError(f"Unexpected reply from {ecu} to mode {mode:02X}: {m.hex().upper()}.")
+    return data, unsupported
+
+
+def primary_ecu(headers) -> str:
+    """The PCM: the lowest responding header (normally 7E8)."""
+    return min(headers)
