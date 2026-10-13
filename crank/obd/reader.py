@@ -9,7 +9,7 @@ from .errors import ObdNotSupported, ObdProtocolError
 from .pids import FREEZE_PIDS, LIVE_PIDS, PIDS
 from .transport import Transport
 
-INIT = ("ATZ", "ATE0", "ATL0", "ATS0", "ATH0", "ATSP0")
+INIT = ("ATZ", "ATE0", "ATL0", "ATS0", "ATH1", "ATSP0")
 STATUS_MODES = (("stored", 0x03), ("pending", 0x07), ("permanent", 0x0A))
 
 
@@ -34,6 +34,9 @@ class ObdReadout:
     protocol: str = ""
     unsupported_modes: list = field(default_factory=list)
     raw: dict = field(default_factory=dict)
+    ecus: list = field(default_factory=list)             # every ECU header that answered, e.g. ["7E8", "7E9"]
+    primary_ecu: str = ""                                # the PCM: live values, freeze frame, supported PIDs
+    notes: list = field(default_factory=list)
     sim: bool = False
     read_at: str = ""
 
@@ -44,11 +47,15 @@ class ObdReadout:
     def lines(self) -> list[str]:
         """Plain-language result lines for the UI."""
         sim = " (simulated)" if self.sim else ""
-        codes = ", ".join(f"{c['code']} ({c['status']})" for c in self.codes)
+        multi = len(self.ecus) > 1
+        codes = ", ".join(f"{c['code']} ({c['status']}" + (f", {c['ecu']}" if multi and c.get("ecu") else "") + ")"
+                          for c in self.codes)
         if not codes:
             codes = ("no codes reported by the modes that were read" if self.unsupported_modes
                      else "none stored, pending or permanent")
         out = [f"Codes{sim}: " + codes]
+        if multi:
+            out.append("ECUs that answered: " + ", ".join(self.ecus))
         if self.mil_on is not None:
             out.append("Check engine light: " + ("on" if self.mil_on else "off"))
         got = [v for v in self.live if v.supported]
@@ -59,26 +66,37 @@ class ObdReadout:
             out.append(f"Freeze frame for {self.freeze_frame['code']}")
         if self.unsupported_modes:
             out.append("PCM does not support mode(s): " + ", ".join(self.unsupported_modes))
-        return out
+        return out + list(self.notes)
 
     def to_event_data(self) -> dict:
         return {"codes": self.codes, "freeze_frame": self.freeze_frame, "mil_on": self.mil_on,
                 "source": "obd", "sim": self.sim, "protocol": self.protocol,
-                "unsupported_modes": self.unsupported_modes, "raw": self.raw}
+                "unsupported_modes": self.unsupported_modes, "raw": self.raw,
+                "ecus": self.ecus, "primary_ecu": self.primary_ecu, "notes": self.notes}
 
 
 class ObdReader:
     def __init__(self, transport: Transport, timeout: float = 5.0):
         self.t, self.timeout = transport, timeout
         self.raw: dict = {}
+        self.primary = ""
 
     def _ask(self, cmd: str) -> str:
         resp = self.t.send(cmd, self.timeout)
         self.raw[cmd] = resp.strip()
         return resp
 
-    def _mode_data(self, mode: int, pid: int | None = None, frame: bool = False) -> bytes | None:
-        return P.response_data(self._ask(P.request(mode, pid, frame)), mode, pid, frame)
+    def _by_ecu(self, mode: int, pid: int | None = None, frame: bool = False):
+        return P.response_data_by_ecu(self._ask(P.request(mode, pid, frame)), mode, pid, frame)
+
+    def _pcm_data(self, mode: int, pid: int | None = None, frame: bool = False) -> bytes | None:
+        res = self._by_ecu(mode, pid, frame)
+        if res is None:
+            return None
+        data, unsupported = res
+        if self.primary in unsupported:
+            raise ObdNotSupported(f"The PCM does not support mode {mode:02X}.")
+        return data.get(self.primary)
 
     def read(self) -> ObdReadout:
         self.raw = {}
@@ -87,15 +105,23 @@ class ObdReader:
         try:
             for cmd in INIT:
                 self._ask(cmd)
-            first = self._mode_data(0x01, 0x00)           # triggers protocol search
-            if first is None:
+            first_raw = self._ask(P.request(0x01, 0x00))      # triggers protocol search
+            msgs = P.ecu_messages(first_raw)
+            if msgs is None:
                 raise ObdProtocolError("The vehicle did not answer. Is the key on?")
             out.protocol = self._ask("ATDPN").strip()
-            can = P.is_can(out.protocol)
-            supported = P.supported_pids(0x00, first)
+            if not P.is_can(out.protocol):
+                raise ObdProtocolError("Only CAN vehicles are supported.")
+            can = True
+            self.primary = out.primary_ecu = P.primary_ecu(msgs)
+            out.ecus = sorted(msgs)
+            if self.primary != "7E8":
+                out.notes.append(f"The engine controller answered from {self.primary}, not 7E8.")
+            data, _ = P.response_data_by_ecu(first_raw, 0x01, 0x00)
+            supported = P.supported_pids(0x00, data[self.primary])
             for base in (0x20, 0x40):
                 if base in supported:
-                    data = self._mode_data(0x01, base)
+                    data = self._pcm_data(0x01, base)
                     supported |= P.supported_pids(base, data) if data else set()
             self._status(out)
             self._codes(out, can)
@@ -112,22 +138,27 @@ class ObdReader:
         return out
 
     def _status(self, out: ObdReadout) -> None:
-        data = self._mode_data(0x01, 0x01)
+        data = self._pcm_data(0x01, 0x01)
         out.mil_on = bool(data[0] & 0x80) if data else None
 
     def _codes(self, out: ObdReadout, can: bool) -> None:
         for status, mode in STATUS_MODES:
-            try:
-                data = self._mode_data(mode)
-            except ObdNotSupported:
-                data = None
-                out.unsupported_modes.append(f"{mode:02X}")
-            for code in P.decode_dtcs(data or b"", can):
-                out.codes.append({"code": code, "status": status, "description": P.describe_dtc(code) or ""})
+            res = self._by_ecu(mode)
+            if res is None:
+                continue
+            data, unsupported = res
+            for ecu in unsupported:
+                out.unsupported_modes.append(f"{mode:02X}" if ecu == self.primary else f"{mode:02X} ({ecu})")
+            for ecu, body in data.items():
+                if ecu not in out.ecus:
+                    out.ecus = sorted(out.ecus + [ecu])
+                for code in P.decode_dtcs(body, can):
+                    out.codes.append({"code": code, "status": status, "ecu": ecu,
+                                      "description": P.describe_dtc(code) or ""})
 
     def _freeze(self, out: ObdReadout) -> None:
         try:
-            data = self._mode_data(0x02, 0x02, frame=True)
+            data = self._pcm_data(0x02, 0x02, frame=True)
         except ObdNotSupported:
             out.unsupported_modes.append("02")
             return
@@ -139,7 +170,7 @@ class ObdReader:
         values = []
         for pid in FREEZE_PIDS:
             try:
-                d = self._mode_data(0x02, pid, frame=True)
+                d = self._pcm_data(0x02, pid, frame=True)
             except ObdNotSupported:
                 d = None
             dec = P.decode_pid(pid, d) if d else None
@@ -152,7 +183,7 @@ class ObdReader:
             p, value = PIDS[pid], None
             if pid in supported:
                 try:
-                    d = self._mode_data(0x01, pid)
+                    d = self._pcm_data(0x01, pid)
                 except ObdNotSupported:
                     d = None
                 dec = P.decode_pid(pid, d) if d else None

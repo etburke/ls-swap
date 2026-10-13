@@ -102,13 +102,15 @@ temperature, fuel trims and a few more). Each read is added to the case: one `co
 every value the PCM answered. A value the PCM does not support is listed as not supported, never as zero, and a
 real 0 RPM is kept as 0. The tool never clears codes.
 
-The simulator has eight scenarios (healthy, a stored P2119 with 0 RPM, many codes, a PCM with limited support, and
-four failure modes). **Real adapter** reads classic-Bluetooth ELM327/STN adapters (for example the OBDLink MX+) through
+The simulator has thirteen scenarios (healthy, a stored P2119 with 0 RPM, many codes, a PCM with limited support, four
+failure modes, and five multi-ECU ones: `pcm_and_trans`, `interleaved_multiframe`, `same_code_two_ecus`, `pcm_not_7e8`,
+`trans_rejects_mode`). **Real adapter** reads classic-Bluetooth ELM327/STN adapters (for example the OBDLink MX+) through
 a serial port: pair the adapter in macOS Bluetooth settings first, then pick its port (or Auto-detect). Only
 read-only requests are ever sent: modes 01, 02, 03, 07 and 0A plus a fixed set of adapter setup commands. Anything
 that could write adapter memory or put it to sleep (`ATPP`, `STSAVCAL`, `STSLEEP`, ...) is refused before it reaches
-the port. **Do not do a first real read until multi-ECU handling lands** (issue #4): a second controller answering
-the same request can currently corrupt a read. BLE adapters would plug in behind the same `Transport` interface
+the port. Reads keep every ECU's answers apart: trouble codes from all ECUs are recorded and labeled with the ECU that
+reported them (shown when more than one ECU answered), while live values, the freeze frame and the supported-PID map
+come from the engine controller only (normally `7E8`). Only 11-bit CAN is supported. BLE adapters would plug in behind the same `Transport` interface
 (`open`, `send`, `close`) via `bleak`.
 
 ## First session at the truck
@@ -125,7 +127,7 @@ the same request can currently corrupt a read. BLE adapters would plug in behind
 - The horizontal-offset sign, valid memory depths in 4-channel mode, and the RAW preamble point count.
 - The verdict thresholds are tuned on simulated data and will need adjusting after the first real captures.
 - 12-bit (WORD) waveform download is not implemented; data is 8-bit.
-- The OBD layer: ELM327 clone quirks and timing, protocol auto-detection on this vehicle, and which modes and PIDs the PSI-flashed E38 answers. Before the first real read the reader must also handle several ECUs answering one request (for example a transmission controller): today the first answer wins.
+- The OBD layer: ELM327 clone quirks and timing, protocol auto-detection on this vehicle, and which modes and PIDs the PSI-flashed E38 answers.
 
 ## Code layout
 

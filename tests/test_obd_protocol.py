@@ -121,3 +121,75 @@ def test_unsupported_negative_responses_raise_not_supported(nrc):
     from crank.obd.errors import ObdNotSupported
     with pytest.raises(ObdNotSupported):
         P.response_data(f"7F 03 {nrc}", 0x03)
+
+
+def test_ecu_single_frame_with_and_without_spaces():
+    want = {"7E8": bytes.fromhex("4100BE3FA813")}
+    assert P.ecu_messages("7E8 06 41 00 BE 3F A8 13\r>") == want
+    assert P.ecu_messages("7E8064100BE3FA813\r\r>") == want
+
+
+def test_ecu_single_frame_padding_is_stripped():
+    assert P.ecu_messages("7E8 02 41 00 AA AA AA AA AA") == {"7E8": bytes.fromhex("4100")}
+
+
+def test_ecu_short_single_frame_is_an_error():
+    with pytest.raises(ObdProtocolError):
+        P.ecu_messages("7E8 06 41 00")
+
+
+def test_ecu_multi_frame_is_reassembled_and_truncated():
+    resp = "7E8 10 0A 43 03 01 33 02 36\r7E8 21 00 16 00 00 00 00 00\r>"
+    assert P.ecu_messages(resp) == {"7E8": bytes.fromhex("43030133023600160000")}
+
+
+def test_two_ecus_interleaved_in_either_order():
+    a = ["7E8 10 0A 43 03 01 33 02 36", "7E8 21 00 16 00 00 00 00 00"]
+    b = ["7E9 10 08 43 02 07 00 07 01", "7E9 21 07 02 00 00 00 00 00"]
+    want = {"7E8": bytes.fromhex("43030133023600160000"), "7E9": bytes.fromhex("4302070007010702")}
+    assert P.ecu_messages("\r".join([a[0], b[0], a[1], b[1]])) == want
+    assert P.ecu_messages("\r".join([b[0], a[0], b[1], a[1]])) == want
+
+
+def test_missing_or_out_of_order_consecutive_frame_is_an_error():
+    with pytest.raises(ObdProtocolError, match="7E8"):
+        P.ecu_messages("7E8 10 0A 43 03 01 33 02 36")
+    with pytest.raises(ObdProtocolError, match="7E8"):
+        P.ecu_messages("7E8 10 0A 43 03 01 33 02 36\r7E8 22 00 16 00 00 00 00 00")
+    with pytest.raises(ObdProtocolError, match="7E8"):
+        P.ecu_messages("7E8 21 00 16 00 00 00 00 00")
+
+
+def test_ecu_no_data_is_none_and_adapter_errors_raise():
+    assert P.ecu_messages("NO DATA\r>") is None
+    with pytest.raises(ObdProtocolError):
+        P.ecu_messages("CAN ERROR")
+    with pytest.raises(ObdProtocolError):
+        P.ecu_messages("?")
+
+
+@pytest.mark.parametrize("text", ["18DAF110064100BE3FA8", "48 6B 10 41 0C 1A F8 3C", "@#$%^"])
+def test_unsupported_header_shapes_are_rejected_readably(text):
+    with pytest.raises(ObdProtocolError, match="11-bit CAN|Unreadable"):
+        P.ecu_messages(text)
+
+
+def test_by_ecu_returns_positive_data_and_lists_not_supported_ecus():
+    resp = "7E8 03 7F 03 11 00 00 00 00\r7E9 04 43 01 01 33 00 00 00"
+    assert P.response_data_by_ecu(resp, 3) == ({"7E9": bytes([0x01, 0x01, 0x33])}, ["7E8"])
+
+
+def test_by_ecu_busy_negative_response_names_the_ecu():
+    with pytest.raises(ObdProtocolError, match="7E8"):
+        P.response_data_by_ecu("7E8 03 7F 03 22 00 00 00 00", 3)
+
+
+def test_by_ecu_no_data_and_wrong_reply():
+    assert P.response_data_by_ecu("NO DATA", 3) is None
+    with pytest.raises(ObdProtocolError):
+        P.response_data_by_ecu("7E8 04 41 0C 1A F8 00 00 00", 1, 0x0D)
+
+
+def test_primary_ecu_is_the_lowest_header():
+    assert P.primary_ecu(["7E9", "7E8"]) == "7E8"
+    assert P.primary_ecu({"7EA": b"", "7E9": b""}) == "7E9"

@@ -52,7 +52,7 @@ def test_unsupported_modes_are_listed_and_do_not_fail_the_read():
 
 def test_raw_responses_are_kept_as_evidence():
     r = read("p2119_zero_rpm")
-    assert r.raw["03"].startswith("43") and "010C" in r.raw
+    assert "7E8" in r.raw["03"] and "010C" in r.raw
 
 
 @pytest.mark.parametrize("name,exc", [("silent_adapter", ObdTimeout), ("no_vehicle", ObdProtocolError),
@@ -100,7 +100,7 @@ def test_freeze_frame_dtc_0000_means_no_freeze_frame():
     class NoFreeze(SimTransport):
         def send(self, cmd, timeout=5.0):
             if cmd.strip().upper().replace(" ", "") == "020200":
-                return "42 02 00 00 00"
+                return "7E8 05 42 02 00 00 00 00 00"
             return super().send(cmd, timeout)
     r = ObdReader(NoFreeze("p2119_zero_rpm")).read()
     assert r.freeze_frame is None
@@ -167,3 +167,41 @@ def test_no_data_on_the_first_request_asks_about_the_key():
             return "NO DATA"
     with pytest.raises(ObdProtocolError, match="Is the key on"):
         ObdReader(KeyOff("healthy")).read()
+
+
+def test_pcm_and_trans_records_both_ecus_codes_tagged():
+    r = read("pcm_and_trans")
+    assert {(c["code"], c["ecu"]) for c in r.codes} == {("P2119", "7E8"), ("P0700", "7E9")}
+    assert r.ecus == ["7E8", "7E9"] and r.primary_ecu == "7E8" and r.notes == []
+    assert r.freeze_frame["code"] == "P2119" and live(r)["Engine RPM"].value == 0.0
+    assert "P0700 (stored, 7E9)" in " ".join(r.lines())
+
+
+def test_interleaved_multiframe_code_lists_are_attributed():
+    r = read("interleaved_multiframe")
+    assert {c["code"] for c in r.codes if c["ecu"] == "7E8"} == {"P0335", "P0336", "P0016"}
+    assert {c["code"] for c in r.codes if c["ecu"] == "7E9"} == {"P0700", "P0701", "P0702"}
+
+
+def test_same_code_from_two_ecus_is_two_rows():
+    r = read("same_code_two_ecus")
+    assert sorted((c["code"], c["ecu"]) for c in r.codes) == [("P0335", "7E8"), ("P0335", "7E9")]
+
+
+def test_pcm_not_on_7e8_is_used_and_noted():
+    r = read("pcm_not_7e8")
+    assert r.primary_ecu == "7E9" and r.codes[0]["ecu"] == "7E9"
+    assert any("7E9" in n for n in r.notes) and live(r)["Engine RPM"].supported
+
+
+def test_an_ecu_rejecting_a_mode_does_not_fail_the_read():
+    r = read("trans_rejects_mode")
+    assert "0A (7E9)" in r.unsupported_modes and "0A" not in r.unsupported_modes
+    assert {c["code"] for c in r.codes} == {"P2119", "P0700"}
+
+
+def test_single_ecu_read_looks_exactly_as_before():
+    r = read("p2119_zero_rpm")
+    assert r.ecus == ["7E8"] and r.codes[0]["ecu"] == "7E8"
+    assert not any("7E8" in line for line in r.lines())
+    assert r.lines()[0] == "Codes (simulated): P2119 (stored)"

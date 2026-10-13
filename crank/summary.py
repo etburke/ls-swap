@@ -56,7 +56,10 @@ def describe(e: Event) -> str:
     if e.type == "code_read":
         sim = " [SIMULATED]" if d.get("sim") else ""
         if d.get("source") == "obd":
-            codes = ", ".join(f"{c.get('code', '?')} ({c.get('status', '?')})" for c in d.get("codes", []))
+            multi = len(d.get("ecus") or []) > 1
+            codes = ", ".join(
+                f"{c.get('code', '?')} ({c.get('status', '?')}"
+                + (f", {c['ecu']}" if multi and c.get("ecu") else "") + ")" for c in d.get("codes", []))
             unread = [str(m) for m in d.get("unsupported_modes") or []]
             if not codes:
                 codes = ("no codes reported by the modes that were read" if unread
@@ -96,14 +99,15 @@ def build_summary(case: Case) -> Summary:
                            sim=bool(e.data.get("sim")))
                       for e in latest.values()]
 
-    codes: dict[str, dict] = {}                       # every code ever read, with its latest status
+    codes: dict[tuple, dict] = {}                     # every (code, ecu) ever read, with its latest status
     for e in events:
         if e.type != "code_read":
             continue
         rows = [c for c in e.data.get("codes", []) if isinstance(c, dict) and c.get("code")]
         sim = bool(e.data.get("sim"))
+        multi = len(e.data.get("ecus") or []) > 1
         if e.data.get("source") == "obd":               # an OBD read lists every code the PCM holds
-            now = {c["code"] for c in rows}
+            now = {(c["code"], c.get("ecu", "")) for c in rows}
             unread = set(e.data.get("unsupported_modes") or [])
             for k, c in list(codes.items()):
                 if k not in now and _MODE_OF_STATUS.get(c.get("status")) not in unread:
@@ -112,7 +116,7 @@ def build_summary(case: Case) -> Summary:
                 ff = e.data.get("freeze_frame")
                 s.freeze_frame = {**ff, "sim": sim, "ts": e.ts} if isinstance(ff, dict) else None
         for c in rows:
-            codes[c["code"]] = {**c, "sim": sim}
+            codes[(c["code"], c.get("ecu", ""))] = {**c, "sim": sim, "show_ecu": multi}
     s.codes = list(codes.values())
 
     caps = [e for e in events if e.type == "capture"]
