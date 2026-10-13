@@ -79,13 +79,35 @@ def _quick_add(case, capture_ids):
             st.error(str(e))
 
 
+def pick_obd_source(key: str):
+    """Simulator or real adapter. Returns a Controller.read_obd source, or None if no adapter port."""
+    mode = st.radio("Source", ["Simulator", "Real adapter"], key=f"{key}_mode", horizontal=True)
+    if mode == "Simulator":
+        return st.selectbox("Simulated vehicle", list(SCENARIOS), key=f"{key}_scenario")
+    from crank.obd.serial_transport import list_ports
+    try:
+        ports = list_ports()
+    except ImportError:
+        st.error("Install pyserial (pip install -r requirements.txt) to use a real adapter.")
+        return None
+    st.button("Refresh ports", key=f"{key}_refresh")
+    if not ports:
+        st.warning("No adapter port found. Make sure the adapter is paired in Bluetooth settings, "
+                   "then refresh.")
+        return None
+    choice = st.selectbox("Adapter port", ["Auto-detect"] + [label for label, _ in ports], key=f"{key}_port")
+    if choice == "Auto-detect":
+        return ("serial", "auto")
+    return ("serial", dict(ports)[choice])
+
+
 def _obd():
     st.subheader("Read from the vehicle (OBD-II)")
-    st.caption("Simulator only until an adapter is connected. A read adds the codes, freeze frame and "
-               "live values to the case; it never clears codes.")
-    scen = st.selectbox("Simulated vehicle", list(SCENARIOS), key="obd_scenario")
-    if st.button("Read from OBD", key="obd_read"):
-        readout, err = get_controller().read_obd(scen)
+    st.caption("A read adds the codes, freeze frame and live values to the case; it never clears codes. "
+               "Real-adapter reads are recorded as real, not simulated.")
+    source = pick_obd_source("obd")
+    if st.button("Read from OBD", key="obd_read", disabled=source is None):
+        readout, err = get_controller().read_obd(source)
         if err:
             st.error(err)
         else:
