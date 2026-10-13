@@ -189,3 +189,38 @@ def test_manual_codes_after_an_obd_read_are_kept(case):
     case.append("code_read", "", {"codes": [{"code": "P0335", "description": "", "status": "stored"}]})
     codes = {c["code"] for c in build_summary(case).codes}
     assert {"P2119", "P0335"} <= codes
+
+
+def test_same_code_from_two_ecus_stays_two_rows_in_reports(case):
+    case.append_obd(read("same_code_two_ecus"))
+    s = build_summary(case)
+    assert sorted((c["code"], c["ecu"]) for c in s.codes) == [("P0335", "7E8"), ("P0335", "7E9")]
+    assert "P0335 (stored, 7E8)" in to_markdown(s) and "P0335 (stored, 7E9)" in to_markdown(s)
+    assert "P0335 (stored, 7E8)" in to_html(s) and "P0335 (stored, 7E9)" in to_html(s)
+
+
+def test_timeline_line_labels_ecus_only_when_several_answered(case):
+    case.append_obd(read("pcm_and_trans"))
+    case.append_obd(read("p2119_zero_rpm"))
+    lines = [t["line"] for t in build_summary(case).timeline if t["type"] == "code_read"]
+    assert "P0700 (stored, 7E9)" in lines[0] and "P2119 (stored, 7E8)" in lines[0]
+    assert "7E8" not in lines[1] and "P2119 (stored)" in lines[1]
+
+
+def test_single_ecu_report_has_no_ecu_label(case):
+    case.append_obd(read("p2119_zero_rpm"))
+    assert "P2119 (stored) [SIMULATED]" in to_markdown(build_summary(case))
+
+
+def test_a_code_missing_from_a_later_read_is_demoted_per_ecu(case):
+    case.append_obd(read("pcm_and_trans"))
+    case.append_obd(read("p2119_zero_rpm"))              # transmission silent this time
+    status = {c["ecu"]: c["status"] for c in build_summary(case).codes}
+    assert status["7E9"] == "not in latest OBD read" and status["7E8"] == "stored"
+
+
+def test_old_events_without_an_ecu_still_render(case):
+    case.append("code_read", "", {"source": "obd", "sim": True, "codes": [
+        {"code": "P0335", "status": "stored", "description": ""}]})
+    s = build_summary(case)
+    assert s.codes[0]["code"] == "P0335" and "P0335 (stored)" in to_markdown(s)

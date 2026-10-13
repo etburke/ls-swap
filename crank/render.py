@@ -41,7 +41,8 @@ def _cap_line(c: dict) -> str:
 
 
 def _code(c: dict) -> str:
-    st_ = f" ({c['status']})" if c.get("status") else ""
+    ecu = f", {c['ecu']}" if c.get("show_ecu") and c.get("ecu") else ""
+    st_ = f" ({c['status']}{ecu})" if c.get("status") else ""
     sim = " [SIMULATED]" if c.get("sim") else ""
     return f"{c.get('code')}{st_}{sim} {c.get('description') or 'description not recorded'}"
 
