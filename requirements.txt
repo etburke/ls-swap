@@ -5,3 +5,4 @@ pyvisa>=1.13
 pyvisa-py>=0.7
 pyusb>=1.2
 pytest>=8
+pyserial>=3.5

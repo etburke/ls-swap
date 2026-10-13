@@ -16,3 +16,56 @@ def test_controller_failure_returns_a_message_and_appends_nothing(tmp_path, name
     c = Controller(SessionStore(tmp_path))
     r, err = c.read_obd(name)
     assert r is None and err and c.case().events() == []
+
+
+from crank.obd import serial_transport
+from crank.obd.errors import ObdNoAdapter
+from crank.obd.transport import SimTransport
+
+
+def _serial_via_sim(monkeypatch, scenario="p2119_zero_rpm"):
+    sim = SimTransport(scenario)
+    sim.open()
+
+    class Fake:
+        in_waiting = 0
+
+        def __init__(self):
+            self.written, self.queue = [], []
+
+        def write(self, data):
+            self.written.append(data)
+            self.queue = list((sim.send(data.decode().strip()) + "\r\r>").encode())
+
+        def read(self, n=1):
+            return bytes([self.queue.pop(0)]) if self.queue else b""
+
+        def reset_input_buffer(self): pass
+        def close(self): pass
+
+    fake = Fake()
+    monkeypatch.setattr(serial_transport, "_default_factory", lambda port, baud, timeout: fake)
+    return fake
+
+
+def test_serial_source_reads_and_records_a_real_readout(tmp_path, monkeypatch):
+    fake = _serial_via_sim(monkeypatch)
+    c = Controller(SessionStore(tmp_path))
+    r, err = c.read_obd(("serial", "/dev/cu.fake"))
+    assert err is None and r.codes[0]["code"] == "P2119" and r.sim is False
+    assert [e.type for e in c.case().events()].count("code_read") == 1
+    assert fake.written and fake.written[0] == b"ATZ\r"
+
+
+def test_serial_auto_with_no_port_returns_a_message(tmp_path, monkeypatch):
+    def none(p):
+        raise ObdNoAdapter("No OBD adapter port found.")
+    monkeypatch.setattr("crank.controller.resolve_port", none)
+    c = Controller(SessionStore(tmp_path))
+    r, err = c.read_obd(("serial", "auto"))
+    assert r is None and "No OBD adapter" in err and c.case().events() == []
+
+
+def test_unknown_source_is_a_message_not_a_crash(tmp_path):
+    r, err = Controller(SessionStore(tmp_path)).read_obd(("bluetooth", "x"))
+    assert r is None and err

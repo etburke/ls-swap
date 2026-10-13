@@ -19,3 +19,7 @@ class ObdProtocolError(ObdError):
 
 class ObdNotSupported(ObdProtocolError):
     """The PCM answered with a negative response: it does not support this service."""
+
+
+class ObdForbiddenCommand(ObdError):
+    """A command outside the read-only allowlist; it is never sent to the adapter."""

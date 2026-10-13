@@ -10,6 +10,7 @@ from .case import Case
 from .model import CaptureSettings, Thresholds
 from .obd.errors import ObdError
 from .obd.reader import ObdReader
+from .obd.serial_transport import SerialTransport, resolve_port
 from .obd.transport import SimTransport
 from .scope import RigolScope, SimScope
 from .store import SessionStore
@@ -65,12 +66,20 @@ class Controller:
     def case(self) -> Case:
         return Case(self.store.open(self.session_name))
 
-    def read_obd(self, scenario: str = "healthy"):
+    def _obd_transport(self, source):
+        if isinstance(source, str):
+            return SimTransport(source)
+        kind, value = source
+        if kind == "serial":
+            return SerialTransport(resolve_port(value))
+        raise ObdError(f"Unknown OBD source {kind!r}.")
+
+    def read_obd(self, source="healthy"):
         """One OBD read into the current case. Returns (readout, None) or (None, message).
 
-        Only the simulator is wired in; a real adapter plugs in as another Transport."""
+        `source` is a simulator scenario name, or ("serial", port | "auto") for a real adapter."""
         try:
-            readout = ObdReader(SimTransport(scenario)).read()
+            readout = ObdReader(self._obd_transport(source)).read()
         except ObdError as e:
             return None, str(e)
         self.case().append_obd(readout)
