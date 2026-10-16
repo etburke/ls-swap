@@ -5,7 +5,8 @@ import time
 from dataclasses import dataclass, field
 
 from . import protocol as P
-from .errors import ObdAdapterError, ObdNotSupported, ObdProtocolError
+from .adapter import AdapterInfo, clean_id, parse_sti
+from .errors import ObdAdapterError, ObdNotSupported, ObdProtocolError, ObdTimeout
 from .pids import FREEZE_PIDS, LIVE_PIDS, PIDS
 from .transport import Transport
 
@@ -38,6 +39,7 @@ class ObdReadout:
     ecus: list = field(default_factory=list)             # every ECU header that answered, e.g. ["7E8", "7E9"]
     primary_ecu: str = ""                                # the PCM: live values, freeze frame, supported PIDs
     notes: list = field(default_factory=list)
+    adapter: AdapterInfo = field(default_factory=AdapterInfo)
     sim: bool = False
     read_at: str = ""
 
@@ -54,7 +56,7 @@ class ObdReadout:
         if not codes:
             codes = ("no codes reported by the modes that were read" if self.unsupported_modes
                      else "none stored, pending or permanent")
-        out = [f"Codes{sim}: " + codes]
+        out = [f"Codes{sim}: " + codes, f"Adapter{sim}: {self.adapter.label()}"]
         if multi:
             out.append("ECUs that answered: " + ", ".join(self.ecus))
         if self.mil_on is not None:
@@ -73,7 +75,8 @@ class ObdReadout:
         return {"codes": self.codes, "freeze_frame": self.freeze_frame, "mil_on": self.mil_on,
                 "source": "obd", "sim": self.sim, "protocol": self.protocol,
                 "unsupported_modes": self.unsupported_modes, "raw": self.raw,
-                "ecus": self.ecus, "primary_ecu": self.primary_ecu, "notes": self.notes}
+                "ecus": self.ecus, "primary_ecu": self.primary_ecu, "notes": self.notes,
+                "adapter": self.adapter.to_dict()}
 
 
 class ObdReader:
@@ -113,6 +116,30 @@ class ObdReader:
                     self.notes.append(f"Retried {cmd}: the adapter reported {e.kind}.")
                     time.sleep(self.retry_pause)
 
+    def _id(self, cmd: str, info: AdapterInfo) -> str:
+        """One ID command's cleaned reply. '' when the adapter does not know it or it fails (noted)."""
+        try:
+            resp = self._ask(cmd)
+            P.raise_if_adapter_error(resp)
+        except ObdTimeout:
+            info.notes.append(f"Adapter identification incomplete: {cmd} timed out.")
+            return ""
+        except ObdAdapterError as e:
+            info.notes.append(f"Adapter identification incomplete: {cmd} drew {e.kind}.")
+            return ""
+        return clean_id(resp, cmd)
+
+    def _identify(self) -> AdapterInfo:
+        """Who is on the other end? Provenance, so best-effort: a failed ID command is noted, never fatal.
+        The ST commands are only sent once STI has answered with an STN version."""
+        info = AdapterInfo()
+        info.elm_version = self._id("ATI", info)
+        info.stn_version = parse_sti(self._id("STI", info))
+        if info.stn_version:
+            info.device = self._id("STDI", info)
+            info.serial = self._id("STSN", info)
+        return info
+
     def _by_ecu(self, mode: int, pid: int | None = None, frame: bool = False):
         return self._request(P.request(mode, pid, frame),
                              lambda r: P.response_data_by_ecu(r, mode, pid, frame))[1]
@@ -134,6 +161,8 @@ class ObdReader:
         try:
             for cmd in INIT:
                 self._ask(cmd)
+            out.adapter = self._identify()
+            out.notes.extend(out.adapter.notes)
             first_raw, msgs = self._request(P.request(0x01, 0x00), P.ecu_messages,
                                             self.first_timeout)     # triggers protocol search
             if msgs is None:

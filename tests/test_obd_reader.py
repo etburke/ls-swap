@@ -14,6 +14,18 @@ def live(r):
     return {v.name: v for v in r.live}
 
 
+def sent_by(t):
+    """Wrap a SimTransport so every command it is sent is kept in t.sent."""
+    t.sent = []
+    real = t.send
+
+    def send(cmd, timeout=5.0):
+        t.sent.append(cmd)
+        return real(cmd, timeout)
+    t.send = send
+    return t
+
+
 def test_healthy_read_has_no_codes_and_live_values():
     r = read("healthy")
     assert r.codes == [] and r.mil_on is False and r.sim is True and r.freeze_frame is None
@@ -328,3 +340,74 @@ def test_retries_are_capped_per_read():
 def test_a_first_request_that_times_out_even_at_the_long_timeout_fails_clearly():
     with pytest.raises(ObdTimeout, match="did not answer"):
         read("slow_search", first_timeout=1.0)
+
+
+def test_a_genuine_stn_adapter_is_identified_and_recorded():
+    r = read("healthy")
+    a = r.adapter
+    assert a.supports_st and a.elm_version == "ELM327 v1.5" and a.stn_version == "STN2255 v4.3.1"
+    assert a.device == "OBDLink MX+ 1234" and a.serial == "110012345678"
+    assert r.notes == []                                       # a clean identification leaves no note
+    assert r.to_event_data()["adapter"]["stn_version"] == "STN2255 v4.3.1"
+    assert r.raw["STI"] == "STN2255 v4.3.1" and r.raw["ATI"] == "ELM327 v1.5"
+
+
+def test_an_elm327_clone_is_identified_as_plain_and_the_read_succeeds():
+    t = sent_by(SimTransport("elm_clone"))
+    r = ObdReader(t, retry_pause=0).read()
+    assert not r.adapter.supports_st and r.adapter.elm_version == "ELM327 v1.5"
+    assert r.adapter.device == "" and r.adapter.serial == "" and r.notes == []
+    assert "STDI" not in t.sent and "STSN" not in t.sent       # no ST command beyond the one that proved it
+    assert "not an STN adapter" in r.adapter.label()
+    assert live(r)["Engine RPM"].value == 750.0
+
+
+def test_a_clone_that_answers_sti_with_junk_is_not_stn_and_draws_no_note():
+    class Junk(SimTransport):
+        def send(self, cmd, timeout=5.0):
+            return "@#$%^ \r\x00\x01" if cmd == "STI" else super().send(cmd, timeout)
+
+    r = ObdReader(Junk("healthy"), retry_pause=0).read()
+    assert not r.adapter.supports_st and r.notes == []
+
+
+def test_a_timeout_on_one_id_command_is_noted_and_the_read_completes():
+    r = read("flaky_adapter_id")
+    assert r.adapter.supports_st and r.adapter.device == "OBDLink MX+ 1234" and r.adapter.serial == ""
+    assert any("STSN" in n and "timed out" in n for n in r.notes)
+    assert r.adapter.notes and r.adapter.notes[0] in r.notes
+    assert live(r)["Engine RPM"].value == 750.0
+
+
+def test_an_adapter_error_on_an_id_command_is_noted_not_fatal():
+    class Busy(SimTransport):
+        def send(self, cmd, timeout=5.0):
+            return "BUS BUSY" if cmd == "STDI" else super().send(cmd, timeout)
+
+    r = ObdReader(Busy("healthy"), retry_pause=0).read()
+    assert r.adapter.device == "" and r.adapter.serial == "110012345678"
+    assert any("STDI" in n and "BUS BUSY" in n for n in r.notes)
+
+
+def test_a_missing_adapter_during_identification_still_fails_the_read():
+    class Gone(SimTransport):
+        def send(self, cmd, timeout=5.0):
+            if cmd == "STI":
+                raise ObdNoAdapter("The adapter connection dropped.")
+            return super().send(cmd, timeout)
+
+    with pytest.raises(ObdNoAdapter):
+        ObdReader(Gone("healthy"), retry_pause=0).read()
+
+
+def test_identification_runs_once_after_init_and_before_the_first_request():
+    t = sent_by(SimTransport("lv_reset_mid_read"))             # an LV RESET re-runs INIT mid-read
+    ObdReader(t, retry_pause=0).read()
+    assert t.sent.count("STI") == 1 and t.sent.count("ATI") == 1
+    assert t.sent.index("ATI") > t.sent.index("ATSP0") and t.sent.index("STI") < t.sent.index("0100")
+
+
+def test_result_lines_show_the_adapter_second():
+    lines = read("healthy").lines()
+    assert lines[1] == "Adapter (simulated): OBDLink MX+ 1234 (STN2255 v4.3.1, serial 110012345678)"
+    assert read("elm_clone").lines()[1].startswith("Adapter (simulated): ELM327 v1.5 (not an STN adapter")
