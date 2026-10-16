@@ -209,6 +209,11 @@ class Case:
                 "conditions": cond, "sim": readout.sim}, {"obd": out[0].id}))
         return out
 
+    def obd_kinds(self) -> set[str]:
+        """'real' and/or 'simulated' for the OBD reads recorded in this case. A case holds one kind."""
+        return {"simulated" if e.data.get("sim") else "real"
+                for e in self.events() if e.type == "code_read" and e.data.get("source") == "obd"}
+
     def log_guided_step(self, step, values: dict) -> list[Event]:
         """Turn a saved guided-test step into events."""
         out = []
