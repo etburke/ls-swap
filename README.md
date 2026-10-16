@@ -102,7 +102,7 @@ temperature, fuel trims and a few more). Each read is added to the case: one `co
 every value the PCM answered. A value the PCM does not support is listed as not supported, never as zero, and a
 real 0 RPM is kept as 0. The tool never clears codes.
 
-The simulator has twenty scenarios (healthy, a stored P2119 with 0 RPM, many codes, a PCM with limited support, four
+The simulator has twenty-nine scenarios (healthy, a stored P2119 with 0 RPM, many codes, a PCM with limited support, four
 failure modes, and five multi-ECU ones: `pcm_and_trans`, `interleaved_multiframe`, `same_code_two_ecus`, `pcm_not_7e8`,
 `trans_rejects_mode`, and five for adapter trouble, below). **Real adapter** reads classic-Bluetooth ELM327/STN adapters (for example the OBDLink MX+) through
 a serial port: pair the adapter in macOS Bluetooth settings first, then pick its port (or Auto-detect). Only
@@ -129,6 +129,8 @@ real (not simulated) reads. Identification never fails a read: a timeout or adap
 the read carries on. These four are the only identification commands on the allowlist; every other `ST*` command is
 still refused. Nothing changes behaviour based on what was found yet; later work (`STPTO`, `STPX`) will use it. The
 simulator's `elm_clone` and `flaky_adapter_id` scenarios exercise it. Not yet checked against a real adapter (#3).
+
+**When the PCM does not give a value.** A PID the PCM refuses, answers "busy" to, or does not answer never fails the read: the value is left out and the reason is recorded (not in the PCM's support map, refused by the PCM, PCM busy, no answer). A busy reply is retried once, under the same limit as adapter errors. The result lines group the missing values by reason, and the case summary and report print the latest read's notes (retries, resets, adapter gaps) and any values the PCM would not give. If a PID support map cannot be read, the PIDs it covers are tried anyway. Only a failure on the very first supported-PID request, or a busy reply on a trouble-code request, still fails the read. Trouble codes now show separate rows when a code is both stored and permanent. A case holds real OBD reads or simulated ones, never both: reading from the other kind is refused with a message, so practice runs cannot be mistaken for evidence. The simulator's `pid_refused`, `pid_busy_once`, `pid_busy_always`, `pid_no_answer`, `status_refused`, `map_refused`, `pcm_refuses_0100`, `trans_busy_on_pid` and `many_pids_busy` scenarios exercise these. None of this is checked against a real PCM yet (#3).
 
 ## First session at the truck
 
