@@ -71,6 +71,10 @@ class Scenario:
     pcm_header: str = "7E8"
     other_ecus: dict = field(default_factory=dict)     # header -> {"stored","pending","permanent","unsupported_modes"}
     interleave: bool = False                           # frames from several ECUs alternate on the wire
+    search_delay: float = 0.0                          # seconds the first OBD request takes (protocol search)
+    error_on: str = ""                                 # an OBD request that draws an adapter error
+    error_text: str = ""                               # e.g. "CAN ERROR"
+    error_times: int = 1                               # how many times; 99 = persistent
     fault: str | None = None                           # silent | no_adapter | no_vehicle | garbage | drop_after:N
 
 
@@ -98,6 +102,12 @@ SCENARIOS = {
     "pcm_not_7e8": Scenario(stored=["P2119"], values=LIVE_RUNNING, pcm_header="7E9"),
     "trans_rejects_mode": Scenario(stored=["P2119"], values=LIVE_RUNNING,
                                    other_ecus={"7E9": {"stored": ["P0700"], "unsupported_modes": (0x0A,)}}),
+    "slow_search": Scenario(values=LIVE_RUNNING, search_delay=8.0),
+    "transient_can_error": Scenario(values=LIVE_RUNNING, error_on="010C", error_text="CAN ERROR"),
+    "persistent_can_error": Scenario(values=LIVE_RUNNING, error_on="010C", error_text="CAN ERROR",
+                                     error_times=99),
+    "lv_reset_mid_read": Scenario(values=LIVE_RUNNING, error_on="010C", error_text="LV RESET"),
+    "buffer_full": Scenario(values=LIVE_RUNNING, error_on="010C", error_text="BUFFER FULL"),
     "silent_adapter": Scenario(fault="silent"),
     "no_vehicle": Scenario(fault="no_vehicle"),
     "garbage": Scenario(fault="garbage"),
@@ -113,6 +123,7 @@ class SimTransport(Transport):
             raise ValueError(f"unknown OBD scenario {scenario!r}")
         self.name, self.sc, self.n, self.opened = scenario, copy.deepcopy(SCENARIOS[scenario]), 0, False
         self.headers = False
+        self.searched, self.errors_left = False, self.sc.error_times
 
     def open(self) -> None:
         if self.sc.fault == "no_adapter":
@@ -135,14 +146,25 @@ class SimTransport(Transport):
             return "@#$%^ \r\x00\x01"
         if f == "no_vehicle":
             return "UNABLE TO CONNECT"
+        if not self.searched:
+            if self.sc.search_delay > timeout:
+                raise ObdTimeout("The adapter did not answer. Check it is plugged in and powered.")
+            self.searched = True
+        if cmd == self.sc.error_on and self.errors_left > 0:
+            self.errors_left -= 1
+            if self.sc.error_text == "LV RESET":               # the adapter forgot its settings
+                self.headers, self.searched = False, False
+            return self.sc.error_text
         return self._obd(cmd)
 
     def _at(self, cmd: str) -> str:
         if cmd == "ATZ":
-            self.headers = False
+            self.headers, self.searched = False, False
             return "ELM327 v1.5"
         if cmd in ("ATH0", "ATH1"):
             self.headers = cmd == "ATH1"
+        if cmd == "ATSP0":
+            self.searched = False
         if cmd == "ATDPN":
             return self.sc.protocol
         return "OK"
