@@ -118,3 +118,45 @@ def test_the_flaky_preset_times_out_on_the_serial_number_only():
 def test_every_scenario_names_a_known_adapter_preset():
     assert {s.adapter for s in SCENARIOS.values()} <= set(ADAPTERS)
     assert "elm_clone" in SCENARIOS and "flaky_adapter_id" in SCENARIOS
+
+
+def _hdr(name):
+    t = SimTransport(name)
+    t.open()
+    t.send("ATZ")
+    t.send("ATH1")
+    return t
+
+
+def test_a_refused_pid_draws_a_negative_response_from_the_pcm():
+    t = _hdr("pid_refused")
+    t.send("0100")
+    assert t.send("010D") == "7E8" + "03" + "7F" + "01" + "11" + "00" * 4
+    assert t.send("010C").startswith("7E80441")                # other PIDs still answer normally
+
+
+def test_a_busy_once_pid_is_busy_the_first_time_only():
+    t = _hdr("pid_busy_once")
+    t.send("0100")
+    assert t.send("010C").startswith("7E8037F0122")
+    assert t.send("010C").startswith("7E80441")                # the retry gets the real value
+
+
+def test_a_no_answer_pid_draws_no_data_even_though_it_is_listed():
+    t = _hdr("pid_no_answer")
+    t.send("0100")
+    assert t.send("010D") == "NO DATA"
+
+
+def test_another_ecu_can_answer_busy_to_a_pid_while_the_pcm_answers():
+    t = _hdr("trans_busy_on_pid")
+    t.send("0100")
+    lines = t.send("010C").split("\r")
+    assert any(l.startswith("7E8") and "7F" not in l for l in lines)
+    assert any(l.startswith("7E9037F0122") for l in lines)
+
+
+def test_the_new_scenarios_exist():
+    for n in ("pid_refused", "pid_busy_once", "pid_busy_always", "pid_no_answer", "status_refused",
+              "map_refused", "trans_busy_on_pid", "many_pids_busy"):
+        assert n in SCENARIOS
