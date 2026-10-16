@@ -102,9 +102,9 @@ temperature, fuel trims and a few more). Each read is added to the case: one `co
 every value the PCM answered. A value the PCM does not support is listed as not supported, never as zero, and a
 real 0 RPM is kept as 0. The tool never clears codes.
 
-The simulator has thirteen scenarios (healthy, a stored P2119 with 0 RPM, many codes, a PCM with limited support, four
+The simulator has eighteen scenarios (healthy, a stored P2119 with 0 RPM, many codes, a PCM with limited support, four
 failure modes, and five multi-ECU ones: `pcm_and_trans`, `interleaved_multiframe`, `same_code_two_ecus`, `pcm_not_7e8`,
-`trans_rejects_mode`). **Real adapter** reads classic-Bluetooth ELM327/STN adapters (for example the OBDLink MX+) through
+`trans_rejects_mode`, and five for adapter trouble, below). **Real adapter** reads classic-Bluetooth ELM327/STN adapters (for example the OBDLink MX+) through
 a serial port: pair the adapter in macOS Bluetooth settings first, then pick its port (or Auto-detect). Only
 read-only requests are ever sent: modes 01, 02, 03, 07 and 0A plus a fixed set of adapter setup commands. Anything
 that could write adapter memory or put it to sleep (`ATPP`, `STSAVCAL`, `STSLEEP`, ...) is refused before it reaches
@@ -112,6 +112,14 @@ the port. Reads keep every ECU's answers apart: trouble codes from all ECUs are 
 reported them (shown when more than one ECU answered), while live values, the freeze frame and the supported-PID map
 come from the engine controller only (normally `7E8`). Only 11-bit CAN is supported. BLE adapters would plug in behind the same `Transport` interface
 (`open`, `send`, `close`) via `bleak`.
+
+The reader gives the first request 20 seconds for the adapter's protocol search (later requests get 5) and retries
+a request once when the adapter reports a transient bus error such as `CAN ERROR` or `BUS BUSY`. If the adapter
+resets itself (`LV RESET`, usually a supply dip), the reader re-applies its settings and retries once. Every retry
+is listed in the read's notes, so a read that needed one says so; other adapter errors (`BUFFER FULL`, `STOPPED`,
+and so on) fail the read with a specific message. A second read started while one is running is refused. The
+simulator's `slow_search`, `transient_can_error`, `persistent_can_error`, `lv_reset_mid_read` and `buffer_full`
+scenarios exercise these.
 
 ## First session at the truck
 
