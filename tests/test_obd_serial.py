@@ -158,3 +158,29 @@ def test_resolve_auto_with_none_or_several_lists_candidates():
 
 def test_resolve_explicit_path_is_used_as_is():
     assert resolve_port("/dev/cu.whatever", _ports()) == "/dev/cu.whatever"
+
+
+def test_a_lost_first_atz_is_retried_before_changing_baud():
+    opened, seen = [], []
+
+    def on_write(cmd):
+        seen.append(cmd)
+        return [] if len(seen) == 1 else [b"ELM327 v1.5\r\r>"]
+
+    def factory(port, baud, timeout):
+        opened.append(baud)
+        return FakeSerial(on_write=on_write)
+
+    SerialTransport("/dev/cu.fake", serial_factory=factory, atz_timeout=0.2).open()
+    assert opened == [115200] and seen == ["ATZ", "ATZ"]
+
+
+def test_both_atz_attempts_silent_at_both_bauds_still_raises():
+    seen = []
+
+    def factory(port, baud, timeout):
+        return FakeSerial(on_write=lambda cmd: seen.append(cmd) or [])
+
+    with pytest.raises(ObdTimeout):
+        SerialTransport("/dev/cu.fake", serial_factory=factory, atz_timeout=0.1).open()
+    assert seen == ["ATZ"] * 4

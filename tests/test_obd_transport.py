@@ -1,4 +1,7 @@
+import pytest
+
 from crank.obd import protocol as P
+from crank.obd.errors import ObdTimeout
 from crank.obd.transport import SimTransport
 
 
@@ -51,3 +54,35 @@ def test_rejecting_ecu_sends_a_negative_response():
 def test_pcm_header_can_move():
     t = sim("pcm_not_7e8")
     assert set(P.ecu_messages(t.send("0100"))) == {"7E9"}
+
+
+def test_search_delay_beyond_the_timeout_times_out_the_first_request_only():
+    t = sim("slow_search")
+    t.send("ATSP0")
+    with pytest.raises(ObdTimeout):
+        t.send("0100", 5.0)
+    assert t.send("0100", 20.0).startswith("7E8")
+    assert t.send("010C", 5.0).startswith("7E8")
+
+
+def test_injected_error_is_answered_once_then_normal():
+    t = sim("transient_can_error")
+    assert t.send("010C") == "CAN ERROR"
+    assert t.send("010C").startswith("7E8")
+    assert t.send("0105").startswith("7E8")
+
+
+def test_persistent_error_keeps_coming():
+    t = sim("persistent_can_error")
+    assert [t.send("010C") for _ in range(4)] == ["CAN ERROR"] * 4
+
+
+def test_lv_reset_makes_the_sim_forget_headers_and_protocol():
+    t = sim("lv_reset_mid_read")
+    assert t.send("010C") == "LV RESET"
+    assert t.headers is False and t.searched is False
+    assert not t.send("010C").startswith("7E8")        # headerless until ATH1 is sent again
+
+
+def test_buffer_full_scenario_answers_the_error_text():
+    assert sim("buffer_full").send("010C") == "BUFFER FULL"

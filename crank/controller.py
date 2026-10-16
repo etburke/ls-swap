@@ -31,6 +31,7 @@ class Controller:
         self.sim_fault: str | None = None         # simulator fault injection (tests)
         self.job: CaptureJob | None = None
         self._lock = threading.Lock()
+        self._obd_lock = threading.Lock()
 
     def sync(self, **fields) -> None:
         """The laptop UI pushes its current choices here on every run."""
@@ -78,12 +79,17 @@ class Controller:
         """One OBD read into the current case. Returns (readout, None) or (None, message).
 
         `source` is a simulator scenario name, or ("serial", port | "auto") for a real adapter."""
+        if not self._obd_lock.acquire(blocking=False):
+            return None, "An OBD read is already running."
         try:
-            readout = ObdReader(self._obd_transport(source)).read()
-        except ObdError as e:
-            return None, str(e)
-        self.case().append_obd(readout)
-        return readout, None
+            try:
+                readout = ObdReader(self._obd_transport(source)).read()
+            except ObdError as e:
+                return None, str(e)
+            self.case().append_obd(readout)
+            return readout, None
+        finally:
+            self._obd_lock.release()
 
     def cancel(self) -> None:
         if self.job:

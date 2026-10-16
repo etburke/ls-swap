@@ -1,7 +1,7 @@
 import pytest
 
 from crank.obd import protocol as P
-from crank.obd.errors import ObdProtocolError
+from crank.obd.errors import ObdAdapterError, ObdProtocolError
 
 
 def test_request_strings():
@@ -193,3 +193,50 @@ def test_by_ecu_no_data_and_wrong_reply():
 def test_primary_ecu_is_the_lowest_header():
     assert P.primary_ecu(["7E9", "7E8"]) == "7E8"
     assert P.primary_ecu({"7EA": b"", "7E9": b""}) == "7E9"
+
+
+@pytest.mark.parametrize("text,kind,transient,reset", [
+    ("BUS BUSY", "BUS BUSY", True, False),
+    ("BUS ERROR", "BUS ERROR", True, False),
+    ("CAN ERROR", "CAN ERROR", True, False),
+    ("FB ERROR", "FB ERROR", True, False),
+    ("<RX ERROR", "<RX ERROR", True, False),
+    ("DATA ERROR", "DATA ERROR", True, False),
+    ("FC RX TIMEOUT", "FC RX TIMEOUT", True, False),
+    ("LV RESET", "LV RESET", False, True),
+    ("BUFFER FULL", "BUFFER FULL", False, False),
+    ("OUT OF MEMORY", "OUT OF MEMORY", False, False),
+    ("UART RX OVERFLOW", "UART RX OVERFLOW", False, False),
+    ("STOPPED", "STOPPED", False, False),
+    ("ACT ALERT", "ACT ALERT", False, False),
+    ("ERR94", "ERR", False, False),
+    ("UNABLE TO CONNECT", "UNABLE TO CONNECT", False, False),
+    ("BUS INIT: ERROR", "BUS INIT", False, False),
+])
+def test_adapter_errors_are_classified(text, kind, transient, reset):
+    with pytest.raises(ObdAdapterError) as e:
+        P.ecu_messages(text)
+    assert (e.value.kind, e.value.transient, e.value.reset) == (kind, transient, reset)
+
+
+def test_no_vehicle_errors_ask_about_the_key():
+    for text in ("UNABLE TO CONNECT", "BUS INIT: ERROR"):
+        with pytest.raises(ObdAdapterError, match="Is the key on"):
+            P.ecu_messages(text)
+
+
+def test_lv_reset_points_at_adapter_power():
+    with pytest.raises(ObdAdapterError, match="pin 16"):
+        P.ecu_messages("LV RESET")
+
+
+def test_data_lines_do_not_hide_an_adapter_error():
+    with pytest.raises(ObdAdapterError) as e:
+        P.ecu_messages("7E8 06 41 00 BE 3F A8 13\rCAN ERROR")
+    assert e.value.transient
+
+
+def test_unknown_command_is_still_a_plain_protocol_error():
+    with pytest.raises(ObdProtocolError) as e:
+        P.ecu_messages("?")
+    assert not isinstance(e.value, ObdAdapterError)

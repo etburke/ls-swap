@@ -5,12 +5,13 @@ import time
 from dataclasses import dataclass, field
 
 from . import protocol as P
-from .errors import ObdNotSupported, ObdProtocolError
+from .errors import ObdAdapterError, ObdNotSupported, ObdProtocolError
 from .pids import FREEZE_PIDS, LIVE_PIDS, PIDS
 from .transport import Transport
 
 INIT = ("ATZ", "ATE0", "ATL0", "ATS0", "ATH1", "ATSP0")
 STATUS_MODES = (("stored", 0x03), ("pending", 0x07), ("permanent", 0x0A))
+MAX_RETRIES = 3
 
 
 @dataclass
@@ -76,18 +77,45 @@ class ObdReadout:
 
 
 class ObdReader:
-    def __init__(self, transport: Transport, timeout: float = 5.0):
-        self.t, self.timeout = transport, timeout
+    def __init__(self, transport: Transport, timeout: float = 5.0, first_timeout: float = 20.0,
+                 retry_pause: float = 0.3):
+        self.t, self.timeout, self.first_timeout, self.retry_pause = transport, timeout, first_timeout, retry_pause
         self.raw: dict = {}
         self.primary = ""
+        self.notes: list = []
+        self._retries = 0
 
-    def _ask(self, cmd: str) -> str:
-        resp = self.t.send(cmd, self.timeout)
+    def _ask(self, cmd: str, timeout: float | None = None) -> str:
+        resp = self.t.send(cmd, timeout or self.timeout)
         self.raw[cmd] = resp.strip()
         return resp
 
+    def _request(self, cmd: str, parse, timeout: float | None = None):
+        """Send an OBD request and parse the reply. A transient adapter error is retried once; LV RESET
+        re-runs INIT first. Each retry is noted. Returns (reply text, parse(reply))."""
+        retried = False
+        while True:
+            try:
+                resp = self._ask(cmd, timeout)
+                return resp, parse(resp)
+            except ObdAdapterError as e:
+                if retried or self._retries >= MAX_RETRIES or not (e.transient or e.reset):
+                    raise
+                retried = True
+                self._retries += 1
+                if e.reset:
+                    self.notes.append(f"The adapter reset ({e.kind}) during {cmd}; its settings were "
+                                      "re-applied and the request retried.")
+                    for init in INIT:
+                        self._ask(init)
+                    timeout = self.first_timeout                  # the protocol search starts again
+                else:
+                    self.notes.append(f"Retried {cmd}: the adapter reported {e.kind}.")
+                    time.sleep(self.retry_pause)
+
     def _by_ecu(self, mode: int, pid: int | None = None, frame: bool = False):
-        return P.response_data_by_ecu(self._ask(P.request(mode, pid, frame)), mode, pid, frame)
+        return self._request(P.request(mode, pid, frame),
+                             lambda r: P.response_data_by_ecu(r, mode, pid, frame))[1]
 
     def _pcm_data(self, mode: int, pid: int | None = None, frame: bool = False) -> bytes | None:
         res = self._by_ecu(mode, pid, frame)
@@ -101,12 +129,13 @@ class ObdReader:
     def read(self) -> ObdReadout:
         self.raw = {}
         out = ObdReadout(sim=self.t.sim, read_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
+        self.notes, self._retries = out.notes, 0
         self.t.open()
         try:
             for cmd in INIT:
                 self._ask(cmd)
-            first_raw = self._ask(P.request(0x01, 0x00))      # triggers protocol search
-            msgs = P.ecu_messages(first_raw)
+            first_raw, msgs = self._request(P.request(0x01, 0x00), P.ecu_messages,
+                                            self.first_timeout)     # triggers protocol search
             if msgs is None:
                 raise ObdProtocolError("The vehicle did not answer. Is the key on?")
             out.protocol = self._ask("ATDPN").strip()

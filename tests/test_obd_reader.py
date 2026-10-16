@@ -1,12 +1,13 @@
 import pytest
 
-from crank.obd.errors import ObdNoAdapter, ObdProtocolError, ObdTimeout
+from crank.obd.errors import ObdAdapterError, ObdNoAdapter, ObdProtocolError, ObdTimeout
+from crank.obd.pids import LIVE_PIDS
 from crank.obd.reader import ObdReader
-from crank.obd.transport import SCENARIOS, SimTransport
+from crank.obd.transport import LIVE_RUNNING, SCENARIOS, SimTransport
 
 
-def read(name):
-    return ObdReader(SimTransport(name)).read()
+def read(name, **kw):
+    return ObdReader(SimTransport(name), retry_pause=0, **kw).read()
 
 
 def live(r):
@@ -205,3 +206,125 @@ def test_single_ecu_read_looks_exactly_as_before():
     assert r.ecus == ["7E8"] and r.codes[0]["ecu"] == "7E8"
     assert not any("7E8" in line for line in r.lines())
     assert r.lines()[0] == "Codes (simulated): P2119 (stored)"
+
+
+def test_slow_protocol_search_succeeds_with_the_long_first_timeout():
+    assert live(read("slow_search"))["Engine RPM"].value == 750.0
+
+
+def test_slow_protocol_search_times_out_if_the_first_timeout_is_short():
+    with pytest.raises(ObdTimeout):
+        read("slow_search", first_timeout=5.0)
+
+
+def test_only_the_first_request_gets_the_long_timeout():
+    seen = []
+
+    class Rec(SimTransport):
+        def send(self, cmd, timeout=5.0):
+            seen.append((cmd, timeout))
+            return super().send(cmd, timeout)
+    ObdReader(Rec("healthy"), retry_pause=0).read()
+    assert dict(seen)["0100"] == 20.0
+    assert {t for c, t in seen if c != "0100"} == {5.0}
+
+
+def test_a_clean_read_has_no_notes():
+    assert read("healthy").notes == [] and read("p2119_zero_rpm").notes == []
+
+
+def test_a_transient_error_is_retried_once_and_noted():
+    r = read("transient_can_error")
+    assert live(r)["Engine RPM"].value == 750.0
+    assert r.notes == ["Retried 010C: the adapter reported CAN ERROR."]
+    assert "Retried 010C: the adapter reported CAN ERROR." in r.lines()
+
+
+def test_a_persistent_transient_error_fails_with_the_specific_message():
+    with pytest.raises(ObdAdapterError, match="CAN error"):
+        read("persistent_can_error")
+
+
+def test_a_fatal_adapter_error_is_not_retried():
+    with pytest.raises(ObdAdapterError, match="buffer overflowed"):
+        read("buffer_full")                # error_times=1: a retry would have succeeded
+
+
+def test_lv_reset_reinitialises_the_adapter_and_the_read_continues():
+    sent = []
+
+    class Rec(SimTransport):
+        def send(self, cmd, timeout=5.0):
+            sent.append(cmd)
+            return super().send(cmd, timeout)
+    r = ObdReader(Rec("lv_reset_mid_read"), retry_pause=0).read()
+    assert live(r)["Engine RPM"].value == 750.0 and r.codes == []
+    assert r.notes[0].startswith("The adapter reset (LV RESET) during 010C")
+    assert sent.count("ATZ") == 2 and sent.count("ATH1") == 2
+
+
+def test_lv_reset_retry_uses_the_long_timeout_again():
+    seen = []
+
+    class Rec(SimTransport):
+        def send(self, cmd, timeout=5.0):
+            seen.append((cmd, timeout))
+            return super().send(cmd, timeout)
+    ObdReader(Rec("lv_reset_mid_read"), retry_pause=0).read()
+    assert [t for c, t in seen if c == "010C"] == [5.0, 20.0]
+
+
+def test_a_second_lv_reset_after_the_retry_is_raised_not_looped():
+    t = SimTransport("lv_reset_mid_read")
+    t.errors_left = 99                                       # the adapter keeps resetting
+    with pytest.raises(ObdAdapterError, match="pin 16"):
+        ObdReader(t, retry_pause=0).read()
+    assert t.errors_left == 97                               # two attempts, no more
+
+
+def test_a_failure_while_reinitialising_after_a_reset_is_raised():
+    class Dies(SimTransport):
+        def send(self, cmd, timeout=5.0):
+            if cmd == "ATZ" and self.errors_left == 0:       # the re-init after the reset
+                raise ObdTimeout("The adapter stopped answering.")
+            return super().send(cmd, timeout)
+    with pytest.raises(ObdTimeout):
+        ObdReader(Dies("lv_reset_mid_read"), retry_pause=0).read()
+
+
+def test_a_reply_with_data_and_an_adapter_error_is_retried():
+    class Mixed(SimTransport):
+        def __init__(self):
+            super().__init__("healthy")
+            self.first = True
+
+        def _obd(self, cmd):
+            out = super()._obd(cmd)
+            if cmd == "010C" and self.first:
+                self.first = False
+                return out + "\rCAN ERROR"
+            return out
+    r = ObdReader(Mixed(), retry_pause=0).read()
+    assert live(r)["Engine RPM"].value == 750.0 and len(r.notes) == 1
+
+
+def test_retries_are_capped_per_read():
+    pids = [f"01{p:02X}" for p in LIVE_PIDS if p in LIVE_RUNNING][:4]
+
+    class Flaky(SimTransport):
+        def __init__(self):
+            super().__init__("healthy")
+            self.seen = set()
+
+        def _obd(self, cmd):
+            if cmd in pids and cmd not in self.seen:
+                self.seen.add(cmd)
+                return "CAN ERROR"
+            return super()._obd(cmd)
+    with pytest.raises(ObdAdapterError):
+        ObdReader(Flaky(), retry_pause=0).read()
+
+
+def test_a_first_request_that_times_out_even_at_the_long_timeout_fails_clearly():
+    with pytest.raises(ObdTimeout, match="did not answer"):
+        read("slow_search", first_timeout=1.0)

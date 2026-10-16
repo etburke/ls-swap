@@ -3,11 +3,30 @@ from __future__ import annotations
 
 import re
 
-from .errors import ObdNotSupported, ObdProtocolError
+from .errors import ObdAdapterError, ObdNotSupported, ObdProtocolError
 from .pids import DTC_DESCRIPTIONS, PIDS
 
-ERRORS = ("UNABLE TO CONNECT", "BUS INIT", "CAN ERROR", "BUS BUSY", "BUFFER FULL", "STOPPED",
-          "FB ERROR", "DATA ERROR", "ERR", "ACT ALERT", "LV RESET")
+# (adapter text prefix, class, plain-language message). The longest matching prefix wins.
+# Classes: transient (worth one retry), reset (re-run INIT, then retry), fatal, no_vehicle.
+ADAPTER_ERRORS = (
+    ("UNABLE TO CONNECT", "no_vehicle", "Unable to connect to the vehicle. Is the key on?"),
+    ("BUS INIT", "no_vehicle", "Unable to connect to the vehicle (bus initialisation failed). Is the key on?"),
+    ("BUS BUSY", "transient", "The CAN bus was busy."),
+    ("BUS ERROR", "transient", "The adapter saw a bus error."),
+    ("CAN ERROR", "transient", "The adapter had a CAN error (it could not reach the bus)."),
+    ("FB ERROR", "transient", "The adapter reported a feedback error on the bus."),
+    ("<RX ERROR", "transient", "The adapter received a corrupted frame."),
+    ("DATA ERROR", "transient", "The adapter received garbled data."),
+    ("FC RX TIMEOUT", "transient", "The vehicle did not send the flow-control frame the adapter waited for."),
+    ("LV RESET", "reset", "The adapter reset itself because its supply voltage dipped (LV RESET). "
+                          "Check its power on OBD pin 16."),
+    ("BUFFER FULL", "fatal", "The adapter's buffer overflowed (BUFFER FULL)."),
+    ("OUT OF MEMORY", "fatal", "The adapter ran out of memory."),
+    ("UART RX OVERFLOW", "fatal", "The adapter's serial input overflowed."),
+    ("STOPPED", "fatal", "The adapter stopped the request before it finished."),
+    ("ACT ALERT", "fatal", "The adapter warned it is about to go to sleep (ACT ALERT)."),
+    ("ERR", "fatal", "The adapter reported an internal error."),
+)
 NOISE = ("SEARCHING", "ELM327", "OK")
 _HEX = re.compile(r"^[0-9A-F]+$")
 
@@ -25,8 +44,10 @@ def _raise_adapter_errors(lines: list[str]) -> None:
     for line in lines:
         if line == "?":
             raise ObdProtocolError("The adapter did not understand the command.")
-        if any(line.startswith(e) for e in ERRORS):
-            raise ObdProtocolError(f"The adapter reported: {line.title()}.")
+        hits = [e for e in ADAPTER_ERRORS if line.startswith(e[0])]
+        if hits:
+            prefix, cls, message = max(hits, key=lambda e: len(e[0]))
+            raise ObdAdapterError(message, kind=prefix, transient=cls == "transient", reset=cls == "reset")
 
 
 def messages(resp: str) -> list[bytes] | None:
