@@ -34,12 +34,19 @@ class SerialTransport(Transport):
             raise ObdNoAdapter(f"Could not open {self.port}: {e}. Is the adapter paired and not in use "
                                "by another app?") from e
 
+    def _atz(self) -> None:
+        """ATZ, once more if it gets no prompt: a sleeping MX+ wakes on the connection and can lose the first command."""
+        try:
+            self.send("ATZ", self.atz_timeout)
+        except ObdTimeout:
+            self.send("ATZ", self.atz_timeout)
+
     def open(self) -> None:
         bauds = [self.baud] + ([BAUD_FALLBACK] if self.baud != BAUD_FALLBACK else [])
         for i, baud in enumerate(bauds):
             self._connect(baud)
             try:
-                self.send("ATZ", self.atz_timeout)
+                self._atz()
                 self.baud = baud
                 return
             except ObdTimeout:
