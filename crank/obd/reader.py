@@ -8,7 +8,7 @@ from . import protocol as P
 from .adapter import AdapterInfo, clean_id, parse_sti
 from .errors import ObdAdapterError, ObdBusy, ObdProtocolError, ObdTimeout
 from .pids import FREEZE_PIDS, LIVE_PIDS, PIDS
-from .reasons import REASON_TEXT
+from .reasons import REASON_TEXT, describe_unavailable
 from .transport import Transport
 
 INIT = ("ATZ", "ATE0", "ATL0", "ATS0", "ATH1", "ATSP0")
@@ -64,9 +64,9 @@ class ObdReadout:
         if self.mil_on is not None:
             out.append("Check engine light: " + ("on" if self.mil_on else "off"))
         got = [v for v in self.live if v.supported]
+        missing = [{"name": v.name, "reason": v.reason or "no_answer"} for v in self.live if not v.supported]
         out.append(f"Live values read: {len(got)} of {len(self.live)}"
-                   + (f" (not supported: {', '.join(v.name for v in self.live if not v.supported)})"
-                      if len(got) < len(self.live) else ""))
+                   + (f" ({describe_unavailable(missing)})" if missing else ""))
         if self.freeze_frame:
             out.append(f"Freeze frame for {self.freeze_frame['code']}")
         if self.unsupported_modes:
@@ -78,6 +78,8 @@ class ObdReadout:
                 "source": "obd", "sim": self.sim, "protocol": self.protocol,
                 "unsupported_modes": self.unsupported_modes, "raw": self.raw,
                 "ecus": self.ecus, "primary_ecu": self.primary_ecu, "notes": self.notes,
+                "unavailable": [{"name": v.name, "reason": v.reason or "no_answer"}
+                                for v in self.live if not v.supported],
                 "adapter": self.adapter.to_dict()}
 
 
@@ -184,7 +186,9 @@ class ObdReader:
                                             self.first_timeout)     # triggers protocol search
             if msgs is None:
                 raise ObdProtocolError("The vehicle did not answer. Is the key on?")
-            out.protocol = self._ask("ATDPN").strip()
+            out.protocol = clean_id(self._ask("ATDPN"), "ATDPN")
+            if not out.protocol:
+                raise ObdProtocolError("The adapter did not report its protocol.")
             if not P.is_can(out.protocol):
                 raise ObdProtocolError("Only CAN vehicles are supported.")
             can = True

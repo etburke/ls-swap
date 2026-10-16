@@ -105,7 +105,7 @@ def test_every_scenario_is_known_and_unknown_is_rejected():
 def test_readout_lines_are_plain_language():
     lines = read("limited_pcm").lines()
     assert lines[0] == "Codes (simulated): P2119 (stored)" and "Check engine light: on" in lines
-    assert any(l.startswith("Live values read: 2 of 10 (not supported:") for l in lines)
+    assert any(l.startswith("Live values read: 2 of 10 (not in the PCM's support map:") for l in lines)
     assert any("does not support mode" in l for l in lines)
 
 
@@ -496,3 +496,33 @@ def test_a_busy_freeze_frame_request_is_noted_not_fatal():
     r = ObdReader(FreezeBusy("p2119_zero_rpm"), retry_pause=0).read()
     assert r.freeze_frame is None and any("Freeze frame unavailable" in n for n in r.notes)
     assert [c["code"] for c in r.codes] == ["P2119"]
+
+
+def test_result_lines_group_the_missing_values_by_reason():
+    lines = read("pid_refused").lines()
+    assert any(l.startswith("Live values read: 9 of 10 (refused by the PCM: Vehicle speed)") for l in lines)
+    assert "(" not in [l for l in read("healthy").lines() if l.startswith("Live values")][0]
+
+
+def test_event_data_records_every_value_without_a_reason():
+    assert read("healthy").to_event_data()["unavailable"] == []
+    got = read("pid_refused").to_event_data()["unavailable"]
+    assert got == [{"name": "Vehicle speed", "reason": "refused"}]
+    assert {"name": "Control module voltage", "reason": "not_in_map"} in read("limited_pcm").to_event_data()["unavailable"]
+
+
+def test_atdpn_reply_with_an_echo_or_blank_lines_still_parses():
+    class Echo(SimTransport):
+        def send(self, cmd, timeout=5.0):
+            return "ATDPN\r\rA6" if cmd == "ATDPN" else super().send(cmd, timeout)
+
+    assert ObdReader(Echo("healthy"), retry_pause=0).read().protocol == "A6"
+
+
+def test_an_empty_atdpn_reply_is_a_clear_error():
+    class Silent(SimTransport):
+        def send(self, cmd, timeout=5.0):
+            return "" if cmd == "ATDPN" else super().send(cmd, timeout)
+
+    with pytest.raises(ObdProtocolError, match="did not report its protocol"):
+        ObdReader(Silent("healthy"), retry_pause=0).read()
