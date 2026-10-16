@@ -57,6 +57,13 @@ def _isotp(msg: bytes) -> list[bytes]:
     return out
 
 
+ADAPTERS = {                                           # what an adapter answers to the ID commands
+    "stn": {"ATI": "ELM327 v1.5", "STI": "STN2255 v4.3.1", "STDI": "OBDLink MX+ 1234", "STSN": "110012345678"},
+    "elm327": {"ATI": "ELM327 v1.5"},                  # a clone: every ST* command answers '?'
+    "flaky_id": {"ATI": "ELM327 v1.5", "STI": "STN2255 v4.3.1", "STDI": "OBDLink MX+ 1234", "STSN": None},
+}
+
+
 @dataclass
 class Scenario:
     stored: list = field(default_factory=list)
@@ -75,6 +82,7 @@ class Scenario:
     error_on: str = ""                                 # an OBD request that draws an adapter error
     error_text: str = ""                               # e.g. "CAN ERROR"
     error_times: int = 1                               # how many times; 99 = persistent
+    adapter: str = "stn"                               # key into ADAPTERS; a None reply = the command times out
     fault: str | None = None                           # silent | no_adapter | no_vehicle | garbage | drop_after:N
 
 
@@ -108,10 +116,12 @@ SCENARIOS = {
                                      error_times=99),
     "lv_reset_mid_read": Scenario(values=LIVE_RUNNING, error_on="010C", error_text="LV RESET"),
     "buffer_full": Scenario(values=LIVE_RUNNING, error_on="010C", error_text="BUFFER FULL"),
+    "elm_clone": Scenario(values=LIVE_RUNNING, adapter="elm327"),
+    "flaky_adapter_id": Scenario(values=LIVE_RUNNING, adapter="flaky_id"),
     "silent_adapter": Scenario(fault="silent"),
     "no_vehicle": Scenario(fault="no_vehicle"),
     "garbage": Scenario(fault="garbage"),
-    "drops_mid_read": Scenario(values=LIVE_RUNNING, fault="drop_after:8"),
+    "drops_mid_read": Scenario(values=LIVE_RUNNING, fault="drop_after:12"),
 }
 
 
@@ -140,6 +150,8 @@ class SimTransport(Transport):
         if f and f.startswith("drop_after:") and self.n > int(f.split(":")[1]):
             raise ObdTimeout("The adapter stopped answering partway through the read.")
         cmd = cmd.strip().upper().replace(" ", "")
+        if cmd in ("STI", "STDI", "STSN"):
+            return self._identify(cmd)
         if cmd.startswith("AT"):
             return self._at(cmd)
         if f == "garbage":
@@ -157,6 +169,14 @@ class SimTransport(Transport):
             return self.sc.error_text
         return self._obd(cmd)
 
+    def _identify(self, cmd: str) -> str:
+        ids = ADAPTERS[self.sc.adapter]
+        if cmd not in ids:
+            return "?"
+        if ids[cmd] is None:
+            raise ObdTimeout("The adapter did not answer. Check it is plugged in and powered.")
+        return ids[cmd]
+
     def _at(self, cmd: str) -> str:
         if cmd == "ATZ":
             self.headers, self.searched = False, False
@@ -165,6 +185,8 @@ class SimTransport(Transport):
             self.headers = cmd == "ATH1"
         if cmd == "ATSP0":
             self.searched = False
+        if cmd == "ATI":
+            return ADAPTERS[self.sc.adapter]["ATI"]
         if cmd == "ATDPN":
             return self.sc.protocol
         return "OK"

@@ -2,7 +2,7 @@ import pytest
 
 from crank.obd import protocol as P
 from crank.obd.errors import ObdTimeout
-from crank.obd.transport import SimTransport
+from crank.obd.transport import ADAPTERS, SCENARIOS, SimTransport
 
 
 def sim(name, headers=True):
@@ -86,3 +86,35 @@ def test_lv_reset_makes_the_sim_forget_headers_and_protocol():
 
 def test_buffer_full_scenario_answers_the_error_text():
     assert sim("buffer_full").send("010C") == "BUFFER FULL"
+
+
+def _open(name):
+    t = SimTransport(name)
+    t.open()
+    return t
+
+
+def test_the_stn_preset_answers_every_id_command():
+    t = _open("healthy")
+    assert t.send("ATI") == "ELM327 v1.5"
+    assert t.send("STI") == "STN2255 v4.3.1"
+    assert t.send("STDI") == "OBDLink MX+ 1234"
+    assert t.send("STSN") == "110012345678"
+
+
+def test_a_clone_answers_question_marks_to_st_commands():
+    t = _open("elm_clone")
+    assert t.send("ATI") == "ELM327 v1.5"
+    assert t.send("STI") == "?" and t.send("STDI") == "?" and t.send("STSN") == "?"
+
+
+def test_the_flaky_preset_times_out_on_the_serial_number_only():
+    t = _open("flaky_adapter_id")
+    assert t.send("STI") == "STN2255 v4.3.1"
+    with pytest.raises(ObdTimeout):
+        t.send("STSN")
+
+
+def test_every_scenario_names_a_known_adapter_preset():
+    assert {s.adapter for s in SCENARIOS.values()} <= set(ADAPTERS)
+    assert "elm_clone" in SCENARIOS and "flaky_adapter_id" in SCENARIOS
