@@ -69,3 +69,11 @@ def test_serial_auto_with_no_port_returns_a_message(tmp_path, monkeypatch):
 def test_unknown_source_is_a_message_not_a_crash(tmp_path):
     r, err = Controller(SessionStore(tmp_path)).read_obd(("bluetooth", "x"))
     assert r is None and err
+
+
+def test_retry_notes_reach_the_stored_case_event(tmp_path):
+    c = Controller(SessionStore(tmp_path))
+    r, err = c.read_obd("transient_can_error")
+    assert err is None
+    ev = [e for e in c.case().events() if e.type == "code_read"][0]
+    assert ev.data["notes"] == ["Retried 010C: the adapter reported CAN ERROR."]
