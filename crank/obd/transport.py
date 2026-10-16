@@ -126,6 +126,7 @@ SCENARIOS = {
     "pid_no_answer": Scenario(values=LIVE_RUNNING, no_answer_pids=("010D",)),
     "status_refused": Scenario(values=LIVE_RUNNING, pid_nrc={"0101": {"nrc": 0x11, "times": 99}}),
     "map_refused": Scenario(values=LIVE_RUNNING, pid_nrc={"0120": {"nrc": 0x11, "times": 99}}),
+    "pcm_refuses_0100": Scenario(values=LIVE_RUNNING, pid_nrc={"0100": {"nrc": 0x11, "times": 99}}),
     "trans_busy_on_pid": Scenario(values=LIVE_RUNNING, other_ecus={
         "7E9": {"pid_nrc": {"010C": {"nrc": 0x22, "times": 99}}}}),
     "many_pids_busy": Scenario(values=LIVE_RUNNING, pid_nrc={

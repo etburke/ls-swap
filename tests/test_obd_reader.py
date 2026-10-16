@@ -411,3 +411,88 @@ def test_result_lines_show_the_adapter_second():
     lines = read("healthy").lines()
     assert lines[1] == "Adapter (simulated): OBDLink MX+ 1234 (STN2255 v4.3.1, serial 110012345678)"
     assert read("elm_clone").lines()[1].startswith("Adapter (simulated): ELM327 v1.5 (not an STN adapter")
+
+
+def test_a_refused_pid_is_marked_and_the_read_completes():
+    r = read("pid_refused")
+    v = live(r)
+    assert v["Vehicle speed"].reason == "refused" and v["Vehicle speed"].value is None
+    assert v["Engine RPM"].value == 750.0 and v["Engine RPM"].reason == "" and r.notes == []
+
+
+def test_busy_once_is_retried_noted_and_then_read():
+    r = read("pid_busy_once")
+    assert live(r)["Engine RPM"].value == 750.0 and live(r)["Engine RPM"].reason == ""
+    assert r.notes == ["Retried 010C: the PCM reported busy (NRC 22)."]
+
+
+def test_busy_always_ends_busy_after_one_retry():
+    r = read("pid_busy_always")
+    v = live(r)["Engine RPM"]
+    assert v.reason == "busy" and v.value is None
+    assert r.notes == ["Retried 010C: the PCM reported busy (NRC 22)."]
+    assert live(r)["Coolant temperature"].value == 90
+
+
+def test_the_retry_cap_holds_across_many_busy_pids():
+    r = read("many_pids_busy")
+    assert len([n for n in r.notes if n.startswith("Retried")]) == 3
+    busy = ["Engine RPM", "Coolant temperature", "Vehicle speed", "Engine load", "Short term fuel trim bank 1"]
+    assert {live(r)[n].reason for n in busy} == {"busy"}
+    assert live(r)["Throttle position"].value is not None
+
+
+def test_no_data_on_a_listed_pid_is_no_answer_not_unsupported():
+    assert live(read("pid_no_answer"))["Vehicle speed"].reason == "no_answer"
+
+
+def test_pids_the_map_does_not_list_are_not_in_map():
+    assert live(read("limited_pcm"))["Control module voltage"].reason == "not_in_map"
+
+
+def test_a_refused_status_request_leaves_the_light_unknown_and_notes_it():
+    r = read("status_refused")
+    assert r.mil_on is None and live(r)["Engine RPM"].value == 750.0
+    assert any("0101" in n and "refused by the PCM" in n for n in r.notes)
+
+
+def test_a_refused_support_map_tries_the_pids_in_its_range_anyway():
+    r = read("map_refused")
+    assert live(r)["Control module voltage"].value == pytest.approx(14.0)      # PID 0x42 is past the map
+    assert any("support map 20" in n and "tried anyway" in n for n in r.notes)
+    assert all(v.reason != "not_in_map" for v in r.live if v.pid > 0x20)
+
+
+def test_the_pcm_refusing_the_first_request_fails_with_a_clear_message():
+    with pytest.raises(ObdProtocolError, match="refused the supported-PID request.*11"):
+        read("pcm_refuses_0100")
+
+
+def test_another_ecu_busy_on_a_pid_does_not_fail_or_retry_the_read():
+    r = read("trans_busy_on_pid")
+    assert live(r)["Engine RPM"].value == 750.0 and r.notes == []
+
+
+def test_freeze_frame_values_that_fail_are_listed_with_a_reason():
+    r = read("p2119_zero_rpm")
+    miss = {u["name"]: u["reason"] for u in r.freeze_frame["unavailable"]}
+    assert miss["Vehicle speed"] == "no_answer" and "Engine RPM" not in miss
+
+    class FreezeBusy(SimTransport):
+        def send(self, cmd, timeout=5.0):
+            return "7E8 03 7F 02 22" if cmd.strip() == "020500" else super().send(cmd, timeout)
+
+    r = ObdReader(FreezeBusy("p2119_zero_rpm"), retry_pause=0).read()
+    miss = {u["name"]: u["reason"] for u in r.freeze_frame["unavailable"]}
+    assert miss["Coolant temperature"] == "busy"
+    assert {"name": "Engine RPM", "value": 0.0, "unit": "rpm"} in r.freeze_frame["values"]
+
+
+def test_a_busy_freeze_frame_request_is_noted_not_fatal():
+    class FreezeBusy(SimTransport):
+        def send(self, cmd, timeout=5.0):
+            return "7E8 03 7F 02 22" if cmd.strip() == "020200" else super().send(cmd, timeout)
+
+    r = ObdReader(FreezeBusy("p2119_zero_rpm"), retry_pause=0).read()
+    assert r.freeze_frame is None and any("Freeze frame unavailable" in n for n in r.notes)
+    assert [c["code"] for c in r.codes] == ["P2119"]
