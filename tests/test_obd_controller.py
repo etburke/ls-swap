@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 
 from crank.controller import Controller
@@ -77,3 +79,44 @@ def test_retry_notes_reach_the_stored_case_event(tmp_path):
     assert err is None
     ev = [e for e in c.case().events() if e.type == "code_read"][0]
     assert ev.data["notes"] == ["Retried 010C: the adapter reported CAN ERROR."]
+
+
+def test_a_second_read_during_a_running_one_is_refused(tmp_path):
+    from crank.obd.transport import SimTransport
+    c = Controller(SessionStore(tmp_path))
+    started, release = threading.Event(), threading.Event()
+
+    class Slow(SimTransport):
+        def open(self):
+            started.set()
+            release.wait(5)
+            super().open()
+
+    c._obd_transport = lambda source: Slow("healthy")
+    out = []
+    th = threading.Thread(target=lambda: out.append(c.read_obd("healthy")))
+    th.start()
+    assert started.wait(5)
+    assert c.read_obd("healthy") == (None, "An OBD read is already running.")
+    release.set()
+    th.join(5)
+    assert out[0][1] is None
+    assert c.read_obd("healthy")[1] is None                   # released afterwards
+
+
+def test_the_read_lock_is_released_after_an_obd_error(tmp_path):
+    c = Controller(SessionStore(tmp_path))
+    assert c.read_obd("silent_adapter")[0] is None
+    assert c.read_obd("healthy")[1] is None
+
+
+def test_the_read_lock_is_released_after_an_unexpected_exception(tmp_path):
+    c = Controller(SessionStore(tmp_path))
+
+    def boom(source):
+        raise RuntimeError("bug")
+    c._obd_transport = boom
+    with pytest.raises(RuntimeError):
+        c.read_obd("healthy")
+    del c._obd_transport
+    assert c.read_obd("healthy")[1] is None
