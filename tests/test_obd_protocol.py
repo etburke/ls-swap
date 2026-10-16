@@ -240,3 +240,16 @@ def test_unknown_command_is_still_a_plain_protocol_error():
     with pytest.raises(ObdProtocolError) as e:
         P.ecu_messages("?")
     assert not isinstance(e.value, ObdAdapterError)
+
+
+@pytest.mark.parametrize("text,kind", [("CAN ERROR", "CAN ERROR"), ("\rLV RESET\r", "LV RESET"),
+                                       ("BUFFER FULL", "BUFFER FULL")])
+def test_raise_if_adapter_error_raises_the_specific_error(text, kind):
+    with pytest.raises(ObdAdapterError) as e:
+        P.raise_if_adapter_error(text)
+    assert e.value.kind == kind
+
+
+@pytest.mark.parametrize("text", ["?", "STN2255 v4.3.1", "ELM327 v1.5", "OBDLink MX+ 1234", "OK", "", "NO DATA"])
+def test_raise_if_adapter_error_ignores_ordinary_replies(text):
+    P.raise_if_adapter_error(text)

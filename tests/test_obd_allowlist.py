@@ -7,7 +7,8 @@ from crank.obd.transport import SimTransport, SCENARIOS
 
 
 @pytest.mark.parametrize("cmd", ["STRSTNVM", "STSAVCAL", "STSLCS", "STSLEEP", "STBTSET", "STWBR 115200",
-                                 "ATPP 0C SV 01", "ATPP", "STI", "STPX h:7DF, d:0100", "0902", "04",
+                                 "ATPP 0C SV 01", "ATPP", "STPX h:7DF, d:0100", "0902", "04", "STPTO 100", "STIX", "STDIX",
+                                 "STSNX", "STSN 1",
                                  "ATZZ", "", "AT", "0", "ATSP6", "ATWS"])
 def test_forbidden_commands_are_rejected(cmd):
     with pytest.raises(ObdForbiddenCommand):
@@ -18,6 +19,12 @@ def test_forbidden_commands_are_rejected(cmd):
                                       ("0a", "0A"), ("07", "07"), ("020200", "020200"), ("ATH1", "ATH1"),
                                       ("ATDPN", "ATDPN"), ("ATSP0", "ATSP0"), ("0100", "0100")])
 def test_allowed_commands_are_normalized(cmd, norm):
+    assert check(cmd) == norm
+
+
+@pytest.mark.parametrize("cmd,norm", [("ATI", "ATI"), ("ati", "ATI"), ("STI", "STI"), ("sti", "STI"),
+                                      ("ST DI", "STDI"), (" stsn ", "STSN")])
+def test_identification_commands_are_allowed(cmd, norm):
     assert check(cmd) == norm
 
 

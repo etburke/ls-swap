@@ -50,6 +50,12 @@ def _raise_adapter_errors(lines: list[str]) -> None:
             raise ObdAdapterError(message, kind=prefix, transient=cls == "transient", reset=cls == "reset")
 
 
+def raise_if_adapter_error(resp: str) -> None:
+    """Raise ObdAdapterError if the reply is a known adapter fault. A '?' line is ignored: for an ID
+    command it only means the adapter does not know it."""
+    _raise_adapter_errors([line for line in _lines(resp) if line != "?"])
+
+
 def messages(resp: str) -> list[bytes] | None:
     """Reassemble the ECU messages in a response. None means 'NO DATA'.
 
