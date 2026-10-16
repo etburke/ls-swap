@@ -5,6 +5,7 @@ from html import escape
 
 import numpy as np
 
+from .obd.reasons import REASON_TEXT
 from .report import decimate
 from .summary import NOT_RECORDED, Summary
 
@@ -47,6 +48,11 @@ def _code(c: dict) -> str:
     return f"{c.get('code')}{st_}{sim} {c.get('description') or 'description not recorded'}"
 
 
+def _unavailable(items) -> str:
+    return ", ".join(f"{u.get('name', '?')} ({REASON_TEXT.get(u.get('reason'), u.get('reason', 'no answer'))})"
+                     for u in items)
+
+
 def _measure(m: dict) -> str:
     sim = " [SIMULATED]" if m.get("sim") else ""
     return f"{m['name']}: {m['value']:g} {m['unit']}{sim}" + (f" ({m['where']})" if m["where"] else "")
@@ -84,6 +90,10 @@ def to_markdown(s: Summary) -> str:
         out.append("- Codes: " + _md(", ".join(_code(c) for c in s.codes)))
     if s.adapter:
         out.append("- Adapter: " + _md(s.adapter))
+    if s.obd_unavailable:
+        out.append("- Not read from the PCM: " + _md(_unavailable(s.obd_unavailable)))
+    if s.obd_notes:
+        out.append("- OBD read notes: " + _md(" ".join(s.obd_notes)))
     if s.freeze_frame:
         out.append("- " + _md(_freeze(s.freeze_frame)))
     out += [f"- {_md(_measure(m))}" for m in s.measurements]
@@ -176,6 +186,10 @@ def to_html(s: Summary, plots: dict | None = None) -> str:
             data.append("Codes: " + e(", ".join(_code(c) for c in s.codes)))
         if s.adapter:
             data.append("Adapter: " + e(s.adapter))
+        if s.obd_unavailable:
+            data.append("Not read from the PCM: " + e(_unavailable(s.obd_unavailable)))
+        if s.obd_notes:
+            data.append("OBD read notes: " + e(" ".join(s.obd_notes)))
         if s.freeze_frame:
             data.append(e(_freeze(s.freeze_frame)))
         data += [e(_measure(m)) for m in s.measurements]
