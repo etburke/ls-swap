@@ -102,7 +102,7 @@ temperature, fuel trims and a few more). Each read is added to the case: one `co
 every value the PCM answered. A value the PCM does not support is listed as not supported, never as zero, and a
 real 0 RPM is kept as 0. The tool never clears codes.
 
-The simulator has eighteen scenarios (healthy, a stored P2119 with 0 RPM, many codes, a PCM with limited support, four
+The simulator has twenty scenarios (healthy, a stored P2119 with 0 RPM, many codes, a PCM with limited support, four
 failure modes, and five multi-ECU ones: `pcm_and_trans`, `interleaved_multiframe`, `same_code_two_ecus`, `pcm_not_7e8`,
 `trans_rejects_mode`, and five for adapter trouble, below). **Real adapter** reads classic-Bluetooth ELM327/STN adapters (for example the OBDLink MX+) through
 a serial port: pair the adapter in macOS Bluetooth settings first, then pick its port (or Auto-detect). Only
@@ -120,6 +120,15 @@ is listed in the read's notes, so a read that needed one says so; other adapter 
 and so on) fail the read with a specific message. A second read started while one is running is refused. The
 simulator's `slow_search`, `transient_can_error`, `persistent_can_error`, `lv_reset_mid_read` and `buffer_full`
 scenarios exercise these.
+
+At the start of every read the reader asks the adapter who it is: `ATI` (the ELM327 version) and `STI`. If `STI`
+answers with an STN firmware string such as `STN2255 v4.3.1`, it also asks `STDI` (device name) and `STSN` (serial
+number). A plain ELM327 clone answers `?` and is recorded as "not an STN adapter, no ST features". The result is stored
+in the case's `code_read` event, shown in the Read OBD result lines, and printed once in the case summary and report for
+real (not simulated) reads. Identification never fails a read: a timeout or adapter error on an ID command is noted and
+the read carries on. These four are the only identification commands on the allowlist; every other `ST*` command is
+still refused. Nothing changes behaviour based on what was found yet; later work (`STPTO`, `STPX`) will use it. The
+simulator's `elm_clone` and `flaky_adapter_id` scenarios exercise it. Not yet checked against a real adapter (#3).
 
 ## First session at the truck
 
