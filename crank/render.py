@@ -82,6 +82,8 @@ def to_markdown(s: Summary) -> str:
     out += ["", "## Key data"]
     if s.codes:
         out.append("- Codes: " + _md(", ".join(_code(c) for c in s.codes)))
+    if s.adapter:
+        out.append("- Adapter: " + _md(s.adapter))
     if s.freeze_frame:
         out.append("- " + _md(_freeze(s.freeze_frame)))
     out += [f"- {_md(_measure(m))}" for m in s.measurements]
@@ -172,6 +174,8 @@ def to_html(s: Summary, plots: dict | None = None) -> str:
         data = []
         if s.codes:
             data.append("Codes: " + e(", ".join(_code(c) for c in s.codes)))
+        if s.adapter:
+            data.append("Adapter: " + e(s.adapter))
         if s.freeze_frame:
             data.append(e(_freeze(s.freeze_frame)))
         data += [e(_measure(m)) for m in s.measurements]

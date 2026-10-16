@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .case import Case, Event, Vehicle
+from .obd.adapter import AdapterInfo
 from .procedure import STEPS
 
 NOT_RECORDED = "not recorded"
@@ -22,6 +23,7 @@ class Summary:
     measurements: list = field(default_factory=list)    # latest per name
     codes: list = field(default_factory=list)           # every code read, with its latest status
     freeze_frame: dict | None = None                    # from the latest OBD read that read mode 02
+    adapter: str = ""                                   # label of the adapter on the latest real OBD read
     captures: list = field(default_factory=list)        # [{"id","label","ts","sim","snapshot"}]
     before_after: list = field(default_factory=list)    # [{"change","before","after"}]
     not_tried: list = field(default_factory=list)       # guided step titles with no data
@@ -106,6 +108,8 @@ def build_summary(case: Case) -> Summary:
         rows = [c for c in e.data.get("codes", []) if isinstance(c, dict) and c.get("code")]
         sim = bool(e.data.get("sim"))
         multi = len(e.data.get("ecus") or []) > 1
+        if e.data.get("source") == "obd" and not sim and isinstance(e.data.get("adapter"), dict):
+            s.adapter = AdapterInfo.from_dict(e.data["adapter"]).label()
         if e.data.get("source") == "obd":               # an OBD read lists every code the PCM holds
             now = {(c["code"], c.get("ecu", "")) for c in rows}
             unread = set(e.data.get("unsupported_modes") or [])

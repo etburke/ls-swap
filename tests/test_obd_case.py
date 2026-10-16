@@ -224,3 +224,46 @@ def test_old_events_without_an_ecu_still_render(case):
         {"code": "P0335", "status": "stored", "description": ""}]})
     s = build_summary(case)
     assert s.codes[0]["code"] == "P0335" and "P0335 (stored)" in to_markdown(s)
+
+
+STN = {"elm_version": "ELM327 v1.5", "stn_version": "STN2255 v4.3.1", "device": "OBDLink MX+",
+       "serial": "123456", "notes": []}
+STN_LINE = "Adapter: OBDLink MX+ (STN2255 v4.3.1, serial 123456)"
+
+
+def real_read(case, adapter):
+    data = {"source": "obd", "sim": False, "codes": [], "ecus": ["7E8"]}
+    if adapter is not None:
+        data["adapter"] = adapter
+    case.append("code_read", "", data)
+
+
+def test_a_real_reads_adapter_shows_once_in_the_summary_and_both_reports(case):
+    real_read(case, STN)
+    s = build_summary(case)
+    assert s.adapter == "OBDLink MX+ (STN2255 v4.3.1, serial 123456)"
+    assert to_markdown(s).count(STN_LINE) == 1 and to_html(s).count(STN_LINE) == 1
+
+
+def test_a_simulated_read_never_sets_the_adapter_line(case):
+    case.append_obd(read("healthy"))                       # the simulator pretends to be an STN
+    s = build_summary(case)
+    assert s.adapter == "" and "Adapter:" not in to_markdown(s) and "Adapter:" not in to_html(s)
+
+
+def test_a_simulated_read_after_a_real_one_does_not_replace_it(case):
+    real_read(case, STN)
+    case.append_obd(read("elm_clone"))
+    assert build_summary(case).adapter.startswith("OBDLink MX+")
+
+
+def test_the_latest_real_read_wins(case):
+    real_read(case, STN)
+    real_read(case, {"elm_version": "ELM327 v1.5"})
+    assert build_summary(case).adapter == "ELM327 v1.5 (not an STN adapter, no ST features)"
+
+
+def test_events_recorded_before_adapter_identification_still_render(case):
+    real_read(case, None)
+    s = build_summary(case)
+    assert s.adapter == "" and "Adapter:" not in to_markdown(s) and "Adapter:" not in to_html(s)
