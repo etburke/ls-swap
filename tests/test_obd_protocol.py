@@ -253,3 +253,28 @@ def test_raise_if_adapter_error_raises_the_specific_error(text, kind):
 @pytest.mark.parametrize("text", ["?", "STN2255 v4.3.1", "ELM327 v1.5", "OBDLink MX+ 1234", "OK", "", "NO DATA"])
 def test_raise_if_adapter_error_ignores_ordinary_replies(text):
     P.raise_if_adapter_error(text)
+
+
+def test_ecu_reply_positive_and_negative_per_ecu():
+    resp = "7E8 03 7F 01 22\r7E9 06 41 00 BE 3F A8 13"
+    assert P.ecu_reply(resp, 1, 0, ecu="7E8") == (None, 0x22)
+    assert P.ecu_reply(resp, 1, 0, ecu="7E9") == (bytes.fromhex("BE3FA813"), None)
+    assert P.ecu_reply(resp, 1, 0, ecu="7EA") is None
+
+
+def test_ecu_reply_no_data_is_none():
+    assert P.ecu_reply("NO DATA", 1, 0x0C, ecu="7E8") is None
+
+
+def test_ecu_reply_ignores_odd_replies_from_other_ecus():
+    resp = "7E8 04 41 0C 0B B8\r7E9 03 41 0D 05"        # 7E9 answers the wrong PID
+    assert P.ecu_reply(resp, 1, 0x0C, ecu="7E8") == (bytes([0x0B, 0xB8]), None)
+
+
+def test_ecu_reply_raises_on_an_unexpected_reply_from_the_wanted_ecu():
+    with pytest.raises(ObdProtocolError):
+        P.ecu_reply("7E8 03 41 0D 05", 1, 0x0C, ecu="7E8")
+
+
+def test_busy_nrcs():
+    assert P.BUSY_NRC == (0x21, 0x22, 0x78)
