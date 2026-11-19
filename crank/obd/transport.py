@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import time
 from itertools import zip_longest
 from dataclasses import dataclass, field
 
@@ -84,6 +85,7 @@ class Scenario:
     other_ecus: dict = field(default_factory=dict)     # header -> {"stored","pending","permanent","unsupported_modes"}
     interleave: bool = False                           # frames from several ECUs alternate on the wire
     search_delay: float = 0.0                          # seconds the first OBD request takes (protocol search)
+    delay: float = 0.0                                 # seconds every reply takes (to try Cancel without hardware)
     error_on: str = ""                                 # an OBD request that draws an adapter error
     error_text: str = ""                               # e.g. "CAN ERROR"
     error_times: int = 1                               # how many times; 99 = persistent
@@ -118,6 +120,7 @@ SCENARIOS = {
     "trans_rejects_mode": Scenario(stored=["P2119"], values=LIVE_RUNNING,
                                    other_ecus={"7E9": {"stored": ["P0700"], "unsupported_modes": (0x0A,)}}),
     "slow_search": Scenario(values=LIVE_RUNNING, search_delay=8.0),
+    "slow_adapter": Scenario(values=LIVE_RUNNING, delay=1.0),
     "transient_can_error": Scenario(values=LIVE_RUNNING, error_on="010C", error_text="CAN ERROR"),
     "persistent_can_error": Scenario(values=LIVE_RUNNING, error_on="010C", error_text="CAN ERROR",
                                      error_times=99),
@@ -163,6 +166,7 @@ class SimTransport(Transport):
         if not self.opened:
             raise ObdNoAdapter("The adapter is not open.")
         self.n += 1
+        self._wait(self.sc.delay)
         f = self.sc.fault
         if f == "silent":
             raise ObdTimeout("The adapter did not answer. Check it is plugged in and powered.")
@@ -187,6 +191,16 @@ class SimTransport(Transport):
                 self.headers, self.searched = False, False
             return self.sc.error_text
         return self._obd(cmd)
+
+    def _wait(self, seconds: float) -> None:
+        """Sleep `seconds`, but give up at once when an interrupt arrives."""
+        end = time.monotonic() + seconds
+        while True:
+            self.check_cancel()
+            left = end - time.monotonic()
+            if left <= 0:
+                return
+            time.sleep(min(0.05, left))
 
     def _identify(self, cmd: str) -> str:
         ids = ADAPTERS[self.sc.adapter]

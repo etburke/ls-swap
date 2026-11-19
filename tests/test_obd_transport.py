@@ -1,7 +1,10 @@
+import threading
+import time
+
 import pytest
 
 from crank.obd import protocol as P
-from crank.obd.errors import ObdTimeout
+from crank.obd.errors import ObdCancelled, ObdTimeout
 from crank.obd.transport import ADAPTERS, SCENARIOS, SimTransport
 
 
@@ -160,3 +163,21 @@ def test_the_new_scenarios_exist():
     for n in ("pid_refused", "pid_busy_once", "pid_busy_always", "pid_no_answer", "status_refused",
               "map_refused", "trans_busy_on_pid", "many_pids_busy"):
         assert n in SCENARIOS
+
+
+def test_slow_adapter_delays_each_reply_and_a_cancel_cuts_the_wait():
+    assert "slow_adapter" in SCENARIOS
+    t = SimTransport("slow_adapter"); t.open()
+    t.cancel = threading.Event()
+    threading.Timer(0.1, t.cancel.set).start()
+    start = time.monotonic()
+    with pytest.raises(ObdCancelled):
+        t.send("ATZ")
+    assert time.monotonic() - start < 0.8
+
+
+def test_a_scenario_without_a_delay_answers_at_once():
+    t = SimTransport("healthy"); t.open()
+    start = time.monotonic()
+    t.send("ATZ")
+    assert time.monotonic() - start < 0.5

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 from . import protocol as P
 from .adapter import AdapterInfo, clean_id, parse_sti
-from .errors import ObdAdapterError, ObdBusy, ObdProtocolError, ObdTimeout
+from .errors import ObdAdapterError, ObdBusy, ObdCancelled, ObdProtocolError, ObdTimeout
 from .pids import FREEZE_PIDS, LIVE_PIDS, PIDS
 from .reasons import REASON_TEXT, describe_unavailable
 from .transport import Transport
@@ -85,15 +85,27 @@ class ObdReadout:
 
 class ObdReader:
     def __init__(self, transport: Transport, timeout: float = 5.0, first_timeout: float = 20.0,
-                 retry_pause: float = 0.3):
+                 retry_pause: float = 0.3, cancel=None):
         self.t, self.timeout, self.first_timeout, self.retry_pause = transport, timeout, first_timeout, retry_pause
+        self.cancel = cancel
         self.raw: dict = {}
         self.primary = ""
         self.notes: list = []
         self._retries = 0
         self.unknown_from: int | None = None
 
+    def _check_interrupt(self) -> None:
+        if self.cancel is not None and self.cancel.is_set():
+            raise ObdCancelled()
+
+    def _pause(self, seconds: float) -> None:
+        if self.cancel is None:
+            time.sleep(seconds)
+        elif self.cancel.wait(seconds):
+            raise ObdCancelled()
+
     def _ask(self, cmd: str, timeout: float | None = None) -> str:
+        self._check_interrupt()
         resp = self.t.send(cmd, timeout or self.timeout)
         self.raw[cmd] = resp.strip()
         return resp
@@ -120,7 +132,7 @@ class ObdReader:
                 else:
                     who = "the PCM" if isinstance(e, ObdBusy) else "the adapter"
                     self.notes.append(f"Retried {cmd}: {who} reported {e.kind}.")
-                    time.sleep(self.retry_pause)
+                    self._pause(self.retry_pause)
 
     def _id(self, cmd: str, info: AdapterInfo) -> str:
         """One ID command's cleaned reply. '' when the adapter does not know it or it fails (noted)."""
@@ -176,6 +188,9 @@ class ObdReader:
         out = ObdReadout(sim=self.t.sim, read_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
         self.notes, self._retries = out.notes, 0
         self.unknown_from = None
+        self._check_interrupt()
+        if self.cancel is not None:
+            self.t.cancel = self.cancel
         self.t.open()
         try:
             for cmd in INIT:

@@ -1,6 +1,9 @@
+import threading
+import time
+
 import pytest
 
-from crank.obd.errors import ObdAdapterError, ObdNoAdapter, ObdProtocolError, ObdTimeout
+from crank.obd.errors import ObdAdapterError, ObdCancelled, ObdNoAdapter, ObdProtocolError, ObdTimeout
 from crank.obd.pids import LIVE_PIDS
 from crank.obd.reader import ObdReader
 from crank.obd.transport import LIVE_RUNNING, SCENARIOS, SimTransport
@@ -526,3 +529,39 @@ def test_an_empty_atdpn_reply_is_a_clear_error():
 
     with pytest.raises(ObdProtocolError, match="did not report its protocol"):
         ObdReader(Silent("healthy"), retry_pause=0).read()
+
+
+def test_a_cancel_set_before_the_read_connects_to_nothing():
+    ev = threading.Event(); ev.set()
+    t = sent_by(SimTransport("healthy"))
+    with pytest.raises(ObdCancelled):
+        ObdReader(t, cancel=ev, retry_pause=0).read()
+    assert t.sent == [] and not t.opened
+
+
+def test_a_cancel_in_the_middle_stops_the_read_and_closes_the_transport():
+    ev, closed = threading.Event(), []
+    t = sent_by(SimTransport("healthy"))
+    inner = t.send
+
+    def send(cmd, timeout=5.0):
+        if cmd == "010C":
+            ev.set()
+        return inner(cmd, timeout)
+    t.send, t.close = send, lambda: closed.append(1)
+    with pytest.raises(ObdCancelled):
+        ObdReader(t, cancel=ev, retry_pause=0).read()
+    assert closed and "010C" in t.sent and "0142" not in t.sent      # 0142 is asked right after 010C
+
+
+def test_a_cancel_ends_the_pause_before_a_retry():
+    ev = threading.Event()
+    threading.Timer(0.1, ev.set).start()
+    start = time.monotonic()
+    with pytest.raises(ObdCancelled):
+        ObdReader(SimTransport("transient_can_error"), cancel=ev, retry_pause=30).read()
+    assert time.monotonic() - start < 5.0
+
+
+def test_a_reader_without_a_cancel_event_still_reads():
+    assert ObdReader(SimTransport("healthy"), retry_pause=0).read().live
