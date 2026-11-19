@@ -5,7 +5,7 @@ import copy
 from itertools import zip_longest
 from dataclasses import dataclass, field
 
-from .errors import ObdNoAdapter, ObdTimeout
+from .errors import ObdCancelled, ObdNoAdapter, ObdTimeout
 from .protocol import request
 
 
@@ -13,6 +13,11 @@ class Transport:
     """One command in, the adapter's reply text out (everything up to the '>' prompt)."""
 
     sim = False
+    cancel = None                                      # anything with is_set(); polled while waiting for a reply
+
+    def check_cancel(self) -> None:
+        if self.cancel is not None and self.cancel.is_set():
+            raise ObdCancelled()
 
     def open(self) -> None:
         raise NotImplementedError
