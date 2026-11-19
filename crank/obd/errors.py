@@ -26,6 +26,16 @@ class ObdAdapterError(ObdProtocolError):
         self.kind, self.transient, self.reset = kind, transient, reset
 
 
+class ObdBusy(ObdAdapterError):
+    """The PCM answered a PID request 'busy', 'conditions not correct' or 'response pending'. Transient,
+    so the reader retries it once like a transient adapter error."""
+
+    def __init__(self, nrc: int):
+        super().__init__(f"The PCM was busy (negative response {nrc:02X}).",
+                         kind=f"busy (NRC {nrc:02X})", transient=True)
+        self.nrc = nrc
+
+
 class ObdNotSupported(ObdProtocolError):
     """The PCM answered with a negative response: it does not support this service."""
 

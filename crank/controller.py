@@ -75,6 +75,17 @@ class Controller:
             return SerialTransport(resolve_port(value))
         raise ObdError(f"Unknown OBD source {kind!r}.")
 
+    def _wrong_kind(self, transport) -> str:
+        """'' if this read may go into the current case, else why not. A case holds real OBD reads or
+        simulated ones, never both, so a practice run cannot be mistaken for evidence."""
+        kind = "simulated" if transport.sim else "real"
+        others = self.case().obd_kinds() - {kind}
+        if not others:
+            return ""
+        have = sorted(others)[0]
+        use = "the simulator" if have == "real" else "a real adapter"
+        return f"This case already has {have} OBD reads. Start a new case to use {use}."
+
     def read_obd(self, source="healthy"):
         """One OBD read into the current case. Returns (readout, None) or (None, message).
 
@@ -83,7 +94,11 @@ class Controller:
             return None, "An OBD read is already running."
         try:
             try:
-                readout = ObdReader(self._obd_transport(source)).read()
+                transport = self._obd_transport(source)
+                wrong = self._wrong_kind(transport)
+                if wrong:
+                    return None, wrong
+                readout = ObdReader(transport).read()
             except ObdError as e:
                 return None, str(e)
             self.case().append_obd(readout)

@@ -83,6 +83,8 @@ class Scenario:
     error_text: str = ""                               # e.g. "CAN ERROR"
     error_times: int = 1                               # how many times; 99 = persistent
     adapter: str = "stn"                               # key into ADAPTERS; a None reply = the command times out
+    pid_nrc: dict = field(default_factory=dict)         # request -> {"nrc", "times"}: the PCM answers 7F <mode> <nrc>
+    no_answer_pids: tuple = ()                          # requests that draw NO DATA though the map lists them
     fault: str | None = None                           # silent | no_adapter | no_vehicle | garbage | drop_after:N
 
 
@@ -118,6 +120,17 @@ SCENARIOS = {
     "buffer_full": Scenario(values=LIVE_RUNNING, error_on="010C", error_text="BUFFER FULL"),
     "elm_clone": Scenario(values=LIVE_RUNNING, adapter="elm327"),
     "flaky_adapter_id": Scenario(values=LIVE_RUNNING, adapter="flaky_id"),
+    "pid_refused": Scenario(values=LIVE_RUNNING, pid_nrc={"010D": {"nrc": 0x11, "times": 99}}),
+    "pid_busy_once": Scenario(values=LIVE_RUNNING, pid_nrc={"010C": {"nrc": 0x22, "times": 1}}),
+    "pid_busy_always": Scenario(values=LIVE_RUNNING, pid_nrc={"010C": {"nrc": 0x22, "times": 99}}),
+    "pid_no_answer": Scenario(values=LIVE_RUNNING, no_answer_pids=("010D",)),
+    "status_refused": Scenario(values=LIVE_RUNNING, pid_nrc={"0101": {"nrc": 0x11, "times": 99}}),
+    "map_refused": Scenario(values=LIVE_RUNNING, pid_nrc={"0120": {"nrc": 0x11, "times": 99}}),
+    "pcm_refuses_0100": Scenario(values=LIVE_RUNNING, pid_nrc={"0100": {"nrc": 0x11, "times": 99}}),
+    "trans_busy_on_pid": Scenario(values=LIVE_RUNNING, other_ecus={
+        "7E9": {"pid_nrc": {"010C": {"nrc": 0x22, "times": 99}}}}),
+    "many_pids_busy": Scenario(values=LIVE_RUNNING, pid_nrc={
+        c: {"nrc": 0x22, "times": 99} for c in ("010C", "0105", "010D", "0104", "0106")}),
     "silent_adapter": Scenario(fault="silent"),
     "no_vehicle": Scenario(fault="no_vehicle"),
     "garbage": Scenario(fault="garbage"),
@@ -134,6 +147,7 @@ class SimTransport(Transport):
         self.name, self.sc, self.n, self.opened = scenario, copy.deepcopy(SCENARIOS[scenario]), 0, False
         self.headers = False
         self.searched, self.errors_left = False, self.sc.error_times
+        self.nrc_left: dict = {}
 
     def open(self) -> None:
         if self.sc.fault == "no_adapter":
@@ -191,6 +205,17 @@ class SimTransport(Transport):
             return self.sc.protocol
         return "OK"
 
+    def _nrc_for(self, owner: str, spec: dict, cmd: str):
+        """The negative-response code this ECU owes for `cmd` right now, or None. Counts down `times`."""
+        s = spec.get(cmd)
+        if not s:
+            return None
+        left = self.nrc_left.setdefault((owner, cmd), s.get("times", 1))
+        if left <= 0:
+            return None
+        self.nrc_left[(owner, cmd)] = left - 1
+        return s["nrc"]
+
     def _obd(self, cmd: str) -> str:
         sc = self.sc
         mode, rest = int(cmd[:2], 16), cmd[2:]
@@ -198,7 +223,17 @@ class SimTransport(Transport):
         body = self._pcm_body(mode, pid)
         if body == "?":
             return "?"
+        if cmd in sc.no_answer_pids:
+            body = None
+        nrc = self._nrc_for(sc.pcm_header, sc.pid_nrc, cmd)
+        if nrc is not None:
+            body = bytes([0x7F, mode, nrc])
         items = [(sc.pcm_header, body)] if body is not None else []
+        if mode in (0x01, 0x02):
+            for ecu, o in sc.other_ecus.items():
+                n = self._nrc_for(ecu, o.get("pid_nrc", {}), cmd)
+                if n is not None:
+                    items.append((ecu, bytes([0x7F, mode, n])))
         if mode in (0x03, 0x07, 0x0A):
             for ecu, o in sc.other_ecus.items():
                 b = self._other_body(o, mode)

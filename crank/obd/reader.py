@@ -6,8 +6,9 @@ from dataclasses import dataclass, field
 
 from . import protocol as P
 from .adapter import AdapterInfo, clean_id, parse_sti
-from .errors import ObdAdapterError, ObdNotSupported, ObdProtocolError, ObdTimeout
+from .errors import ObdAdapterError, ObdBusy, ObdProtocolError, ObdTimeout
 from .pids import FREEZE_PIDS, LIVE_PIDS, PIDS
+from .reasons import REASON_TEXT, describe_unavailable
 from .transport import Transport
 
 INIT = ("ATZ", "ATE0", "ATL0", "ATS0", "ATH1", "ATSP0")
@@ -20,7 +21,8 @@ class LiveValue:
     pid: int
     name: str
     unit: str
-    value: float | None          # None = the PCM does not support / did not answer this PID
+    value: float | None          # None = no value (see `reason`)
+    reason: str = ""             # "" = read; else not_in_map | refused | busy | no_answer
 
     @property
     def supported(self) -> bool:
@@ -62,9 +64,9 @@ class ObdReadout:
         if self.mil_on is not None:
             out.append("Check engine light: " + ("on" if self.mil_on else "off"))
         got = [v for v in self.live if v.supported]
+        missing = [{"name": v.name, "reason": v.reason or "no_answer"} for v in self.live if not v.supported]
         out.append(f"Live values read: {len(got)} of {len(self.live)}"
-                   + (f" (not supported: {', '.join(v.name for v in self.live if not v.supported)})"
-                      if len(got) < len(self.live) else ""))
+                   + (f" ({describe_unavailable(missing)})" if missing else ""))
         if self.freeze_frame:
             out.append(f"Freeze frame for {self.freeze_frame['code']}")
         if self.unsupported_modes:
@@ -76,6 +78,8 @@ class ObdReadout:
                 "source": "obd", "sim": self.sim, "protocol": self.protocol,
                 "unsupported_modes": self.unsupported_modes, "raw": self.raw,
                 "ecus": self.ecus, "primary_ecu": self.primary_ecu, "notes": self.notes,
+                "unavailable": [{"name": v.name, "reason": v.reason or "no_answer"}
+                                for v in self.live if not v.supported],
                 "adapter": self.adapter.to_dict()}
 
 
@@ -87,6 +91,7 @@ class ObdReader:
         self.primary = ""
         self.notes: list = []
         self._retries = 0
+        self.unknown_from: int | None = None
 
     def _ask(self, cmd: str, timeout: float | None = None) -> str:
         resp = self.t.send(cmd, timeout or self.timeout)
@@ -101,7 +106,7 @@ class ObdReader:
             try:
                 resp = self._ask(cmd, timeout)
                 return resp, parse(resp)
-            except ObdAdapterError as e:
+            except ObdAdapterError as e:                  # includes ObdBusy: the PCM said busy
                 if retried or self._retries >= MAX_RETRIES or not (e.transient or e.reset):
                     raise
                 retried = True
@@ -113,7 +118,8 @@ class ObdReader:
                         self._ask(init)
                     timeout = self.first_timeout                  # the protocol search starts again
                 else:
-                    self.notes.append(f"Retried {cmd}: the adapter reported {e.kind}.")
+                    who = "the PCM" if isinstance(e, ObdBusy) else "the adapter"
+                    self.notes.append(f"Retried {cmd}: {who} reported {e.kind}.")
                     time.sleep(self.retry_pause)
 
     def _id(self, cmd: str, info: AdapterInfo) -> str:
@@ -144,19 +150,32 @@ class ObdReader:
         return self._request(P.request(mode, pid, frame),
                              lambda r: P.response_data_by_ecu(r, mode, pid, frame))[1]
 
-    def _pcm_data(self, mode: int, pid: int | None = None, frame: bool = False) -> bytes | None:
-        res = self._by_ecu(mode, pid, frame)
-        if res is None:
-            return None
-        data, unsupported = res
-        if self.primary in unsupported:
-            raise ObdNotSupported(f"The PCM does not support mode {mode:02X}.")
-        return data.get(self.primary)
+    def _pid(self, mode: int, pid: int | None = None, frame: bool = False):
+        """The PCM's data for one PID request and why not: (data, "") or (None, reason). A busy reply is
+        retried once by _request; the PCM refusing a PID never fails the read. Other ECUs are ignored."""
+        def parse(resp):
+            r = P.ecu_reply(resp, mode, pid, frame, ecu=self.primary)
+            if r is not None and r[1] in P.BUSY_NRC:
+                raise ObdBusy(r[1])
+            return r
+        try:
+            _, r = self._request(P.request(mode, pid, frame), parse)
+        except ObdBusy:
+            return None, "busy"
+        if r is None:
+            return None, "no_answer"
+        data, nrc = r
+        return (None, "refused") if nrc is not None else (data, "")
+
+    def _unknown(self, pid: int) -> bool:
+        """True when the support map covering this PID could not be read."""
+        return self.unknown_from is not None and (pid - 1) // 0x20 * 0x20 >= self.unknown_from
 
     def read(self) -> ObdReadout:
         self.raw = {}
         out = ObdReadout(sim=self.t.sim, read_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
         self.notes, self._retries = out.notes, 0
+        self.unknown_from = None
         self.t.open()
         try:
             for cmd in INIT:
@@ -167,7 +186,9 @@ class ObdReader:
                                             self.first_timeout)     # triggers protocol search
             if msgs is None:
                 raise ObdProtocolError("The vehicle did not answer. Is the key on?")
-            out.protocol = self._ask("ATDPN").strip()
+            out.protocol = clean_id(self._ask("ATDPN"), "ATDPN")
+            if not out.protocol:
+                raise ObdProtocolError("The adapter did not report its protocol.")
             if not P.is_can(out.protocol):
                 raise ObdProtocolError("Only CAN vehicles are supported.")
             can = True
@@ -175,12 +196,21 @@ class ObdReader:
             out.ecus = sorted(msgs)
             if self.primary != "7E8":
                 out.notes.append(f"The engine controller answered from {self.primary}, not 7E8.")
-            data, _ = P.response_data_by_ecu(first_raw, 0x01, 0x00)
-            supported = P.supported_pids(0x00, data[self.primary])
+            reply = P.ecu_reply(first_raw, 0x01, 0x00, ecu=self.primary)
+            if reply is None or reply[0] is None:
+                raise ObdProtocolError(
+                    f"The PCM refused the supported-PID request (negative response {reply[1]:02X})."
+                    if reply else "The PCM sent no supported-PID map.")
+            supported = P.supported_pids(0x00, reply[0])
             for base in (0x20, 0x40):
-                if base in supported:
-                    data = self._pcm_data(0x01, base)
-                    supported |= P.supported_pids(base, data) if data else set()
+                if base in supported and self.unknown_from is None:
+                    data, why = self._pid(0x01, base)
+                    if data:
+                        supported |= P.supported_pids(base, data)
+                    else:
+                        self.unknown_from = base
+                        out.notes.append(f"PID support map {base:02X} unavailable "
+                                         f"({REASON_TEXT[why or 'no_answer']}); the PIDs it covers were tried anyway.")
             self._status(out)
             self._codes(out, can)
             self._freeze(out)
@@ -196,8 +226,11 @@ class ObdReader:
         return out
 
     def _status(self, out: ObdReadout) -> None:
-        data = self._pcm_data(0x01, 0x01)
-        out.mil_on = bool(data[0] & 0x80) if data else None
+        data, why = self._pid(0x01, 0x01)
+        if not data:
+            out.notes.append(f"Check engine light status unavailable: {REASON_TEXT[why or 'no_answer']} on 0101.")
+            return
+        out.mil_on = bool(data[0] & 0x80)
 
     def _codes(self, out: ObdReadout, can: bool) -> None:
         for status, mode in STATUS_MODES:
@@ -215,35 +248,40 @@ class ObdReader:
                                       "description": P.describe_dtc(code) or ""})
 
     def _freeze(self, out: ObdReadout) -> None:
-        try:
-            data = self._pcm_data(0x02, 0x02, frame=True)
-        except ObdNotSupported:
+        data, why = self._pid(0x02, 0x02, frame=True)
+        if why == "refused":
             out.unsupported_modes.append("02")
+            return
+        if why == "busy":
+            out.notes.append("Freeze frame unavailable: the PCM was busy.")
             return
         if not data or len(data) < 2:
             return
         if data[0] == 0 and data[1] == 0:                  # 42 02 00 00: the PCM holds no freeze frame
             return
         code = P.decode_dtc(data[0], data[1])
-        values = []
+        values, unavailable = [], []
         for pid in FREEZE_PIDS:
-            try:
-                d = self._pcm_data(0x02, pid, frame=True)
-            except ObdNotSupported:
-                d = None
+            d, why = self._pid(0x02, pid, frame=True)
             dec = P.decode_pid(pid, d) if d else None
             if dec:
                 values.append({"name": PIDS[pid].name, "value": dec[0], "unit": dec[1]})
+            else:
+                unavailable.append({"name": PIDS[pid].name, "reason": why or "no_answer"})
         out.freeze_frame = {"code": code, "description": P.describe_dtc(code) or "", "values": values}
+        if unavailable:
+            out.freeze_frame["unavailable"] = unavailable
 
     def _live(self, out: ObdReadout, supported: set) -> None:
         for pid in LIVE_PIDS:
-            p, value = PIDS[pid], None
-            if pid in supported:
-                try:
-                    d = self._pcm_data(0x01, pid)
-                except ObdNotSupported:
-                    d = None
+            p, value, reason = PIDS[pid], None, ""
+            if pid in supported or self._unknown(pid):
+                d, reason = self._pid(0x01, pid)
                 dec = P.decode_pid(pid, d) if d else None
-                value = dec[0] if dec else None
-            out.live.append(LiveValue(pid, p.name, p.unit, value))
+                if dec:
+                    value = dec[0]
+                elif not reason:
+                    reason = "no_answer"                   # too short to decode
+            else:
+                reason = "not_in_map"
+            out.live.append(LiveValue(pid, p.name, p.unit, value, reason))

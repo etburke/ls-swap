@@ -120,3 +120,45 @@ def test_the_read_lock_is_released_after_an_unexpected_exception(tmp_path):
         c.read_obd("healthy")
     del c._obd_transport
     assert c.read_obd("healthy")[1] is None
+
+
+def test_a_real_read_into_a_simulated_case_is_refused_before_the_adapter_is_touched(tmp_path, monkeypatch):
+    c = Controller(SessionStore(tmp_path))
+    c.read_obd("healthy")
+    fake = _serial_via_sim(monkeypatch)
+    r, err = c.read_obd(("serial", "/dev/cu.fake"))
+    assert r is None and "already has simulated OBD reads" in err and "real adapter" in err
+    assert fake.written == [] and [e.type for e in c.case().events()].count("code_read") == 1
+
+
+def test_a_simulated_read_into_a_real_case_is_refused(tmp_path, monkeypatch):
+    _serial_via_sim(monkeypatch)
+    c = Controller(SessionStore(tmp_path))
+    assert c.read_obd(("serial", "/dev/cu.fake"))[1] is None
+    r, err = c.read_obd("healthy")
+    assert r is None and "already has real OBD reads" in err and "simulator" in err
+    assert [e.type for e in c.case().events()].count("code_read") == 1
+
+
+def test_reads_of_the_same_kind_accumulate_and_the_lock_is_free_after_a_refusal(tmp_path, monkeypatch):
+    c = Controller(SessionStore(tmp_path))
+    assert c.read_obd("healthy")[1] is None
+    _serial_via_sim(monkeypatch)
+    assert c.read_obd(("serial", "/dev/cu.fake"))[1] is not None          # refused
+    assert c.read_obd("p2119_zero_rpm")[1] is None                         # the lock was released
+    assert [e.type for e in c.case().events()].count("code_read") == 2
+
+
+def test_a_case_that_already_mixes_both_kinds_refuses_both(tmp_path, monkeypatch):
+    c = Controller(SessionStore(tmp_path))
+    c.case().append("code_read", "", {"source": "obd", "sim": True, "codes": []})
+    c.case().append("code_read", "", {"source": "obd", "sim": False, "codes": []})
+    assert c.case().obd_kinds() == {"real", "simulated"}
+    _serial_via_sim(monkeypatch)
+    assert c.read_obd("healthy")[0] is None
+    assert c.read_obd(("serial", "/dev/cu.fake"))[0] is None
+    assert [e.type for e in c.case().events()].count("code_read") == 2
+
+
+def test_an_empty_case_accepts_either_kind(tmp_path):
+    assert Controller(SessionStore(tmp_path)).case().obd_kinds() == set()

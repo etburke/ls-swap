@@ -267,3 +267,73 @@ def test_events_recorded_before_adapter_identification_still_render(case):
     real_read(case, None)
     s = build_summary(case)
     assert s.adapter == "" and "Adapter:" not in to_markdown(s) and "Adapter:" not in to_html(s)
+
+
+def test_the_latest_reads_notes_and_unavailable_pids_reach_the_summary_and_reports(case):
+    r = read("pid_refused")
+    case.append_obd(r)
+    s = build_summary(case)
+    assert s.obd_unavailable == [{"name": "Vehicle speed", "reason": "refused"}] and s.obd_notes == []
+    want = "Not read from the PCM: Vehicle speed (refused by the PCM)"
+    assert want in to_markdown(s) and want in to_html(s)
+
+
+def test_retry_notes_are_printed_in_the_reports(case):
+    r = read("transient_can_error")
+    case.append_obd(r)
+    s = build_summary(case)
+    assert s.obd_notes == r.notes and r.notes
+    assert "OBD read notes: " + " ".join(r.notes) in to_markdown(s)
+    assert "OBD read notes: " + " ".join(r.notes) in to_html(s)
+
+
+def test_a_clean_read_adds_nothing_to_the_reports(case):
+    case.append_obd(read("healthy"))
+    s = build_summary(case)
+    assert s.obd_notes == [] and s.obd_unavailable == []
+    assert "OBD read notes" not in to_markdown(s) and "Not read from the PCM" not in to_markdown(s)
+    assert "OBD read notes" not in to_html(s) and "Not read from the PCM" not in to_html(s)
+
+
+def test_values_the_map_does_not_list_are_not_reported_as_missing(case):
+    case.append_obd(read("limited_pcm"))
+    assert build_summary(case).obd_unavailable == []
+
+
+def test_the_latest_read_replaces_the_notes_of_an_earlier_one(case):
+    case.append_obd(read("transient_can_error"))
+    case.append_obd(read("healthy"))
+    assert build_summary(case).obd_notes == []
+
+
+def test_events_without_notes_or_unavailable_keys_still_render(case):
+    real_read(case, None)
+    s = build_summary(case)
+    assert s.obd_notes == [] and s.obd_unavailable == []
+
+
+def _codes_read(case, rows):
+    case.append("code_read", "", {"source": "obd", "sim": False, "ecus": ["7E8"], "codes": [
+        {"code": c, "status": st, "ecu": "7E8", "description": ""} for c, st in rows]})
+
+
+def test_a_code_that_is_stored_and_permanent_shows_as_two_rows(case):
+    case.append_obd(read("many_codes"))
+    rows = [(c["code"], c["status"]) for c in build_summary(case).codes if c["code"] == "P0335"]
+    assert sorted(rows) == [("P0335", "permanent"), ("P0335", "stored")]
+    md = to_markdown(build_summary(case)).replace(" [SIMULATED]", "")
+    assert "P0335 (stored)" in md and "P0335 (permanent)" in md
+
+
+def test_each_status_row_is_demoted_on_its_own(case):
+    _codes_read(case, [("P0335", "stored"), ("P0335", "permanent")])
+    _codes_read(case, [("P0335", "stored")])                   # the permanent entry is gone
+    status = {(c["code"], c["status"]) for c in build_summary(case).codes}
+    assert status == {("P0335", "stored"), ("P0335", "not in latest OBD read")}
+
+
+def test_a_code_changing_status_shows_a_demoted_row_and_the_new_one(case):
+    _codes_read(case, [("P0335", "stored")])
+    _codes_read(case, [("P0335", "pending")])
+    status = sorted(c["status"] for c in build_summary(case).codes)
+    assert status == ["not in latest OBD read", "pending"]

@@ -24,6 +24,8 @@ class Summary:
     codes: list = field(default_factory=list)           # every code read, with its latest status
     freeze_frame: dict | None = None                    # from the latest OBD read that read mode 02
     adapter: str = ""                                   # label of the adapter on the latest real OBD read
+    obd_notes: list = field(default_factory=list)        # notes from the latest OBD read (retries, resets, gaps)
+    obd_unavailable: list = field(default_factory=list)  # [{"name","reason"}] it could not read; not_in_map left out
     captures: list = field(default_factory=list)        # [{"id","label","ts","sim","snapshot"}]
     before_after: list = field(default_factory=list)    # [{"change","before","after"}]
     not_tried: list = field(default_factory=list)       # guided step titles with no data
@@ -101,7 +103,7 @@ def build_summary(case: Case) -> Summary:
                            sim=bool(e.data.get("sim")))
                       for e in latest.values()]
 
-    codes: dict[tuple, dict] = {}                     # every (code, ecu) ever read, with its latest status
+    codes: dict[tuple, dict] = {}                     # every (code, ecu, status) ever read, with its latest status
     for e in events:
         if e.type != "code_read":
             continue
@@ -111,7 +113,10 @@ def build_summary(case: Case) -> Summary:
         if e.data.get("source") == "obd" and not sim and isinstance(e.data.get("adapter"), dict):
             s.adapter = AdapterInfo.from_dict(e.data["adapter"]).label()
         if e.data.get("source") == "obd":               # an OBD read lists every code the PCM holds
-            now = {(c["code"], c.get("ecu", "")) for c in rows}
+            now = {(c["code"], c.get("ecu", ""), c.get("status", "")) for c in rows}
+            s.obd_notes = [str(n) for n in e.data.get("notes") or []]
+            s.obd_unavailable = [u for u in e.data.get("unavailable") or []
+                                 if isinstance(u, dict) and u.get("reason") != "not_in_map"]
             unread = set(e.data.get("unsupported_modes") or [])
             for k, c in list(codes.items()):
                 if k not in now and _MODE_OF_STATUS.get(c.get("status")) not in unread:
@@ -120,7 +125,7 @@ def build_summary(case: Case) -> Summary:
                 ff = e.data.get("freeze_frame")
                 s.freeze_frame = {**ff, "sim": sim, "ts": e.ts} if isinstance(ff, dict) else None
         for c in rows:
-            codes[(c["code"], c.get("ecu", ""))] = {**c, "sim": sim, "show_ecu": multi}
+            codes[(c["code"], c.get("ecu", ""), c.get("status", ""))] = {**c, "sim": sim, "show_ecu": multi}
     s.codes = list(codes.values())
 
     caps = [e for e in events if e.type == "capture"]

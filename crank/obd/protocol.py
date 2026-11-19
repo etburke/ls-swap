@@ -89,6 +89,7 @@ def _hex(s: str) -> bytes:
 _NOT_SUPPORTED_NRC = (0x11, 0x12, 0x31)    # service / sub-function not supported, request out of range
 _NRC_TEXT = {0x21: "busy / conditions not correct", 0x22: "busy / conditions not correct",
              0x78: "response pending"}
+BUSY_NRC = (0x21, 0x22, 0x78)
 
 
 def request(mode: int, pid: int | None = None, frame: bool = False) -> str:
@@ -233,6 +234,22 @@ def response_data_by_ecu(resp: str, mode: int, pid: int | None = None, frame: bo
         else:
             raise ObdProtocolError(f"Unexpected reply from {ecu} to mode {mode:02X}: {m.hex().upper()}.")
     return data, unsupported
+
+
+def ecu_reply(resp: str, mode: int, pid: int | None = None, frame: bool = False, *, ecu: str):
+    """One ECU's answer to a PID request: (data, None) if positive, (None, nrc) if negative, None for
+    NO DATA or when `ecu` sent nothing. Other ECUs' replies are ignored. A negative response is returned,
+    not raised: the reader decides what it means."""
+    msgs = ecu_messages(resp)
+    m = msgs.get(ecu) if msgs else None
+    if m is None:
+        return None
+    head = bytes([mode + 0x40] + ([pid] if pid is not None else []) + ([0] if frame else []))
+    if m.startswith(head):
+        return m[len(head):], None
+    if len(m) >= 3 and m[0] == 0x7F and m[1] == mode:
+        return None, m[2]
+    raise ObdProtocolError(f"Unexpected reply from {ecu} to mode {mode:02X}: {m.hex().upper()}.")
 
 
 def primary_ecu(headers) -> str:
