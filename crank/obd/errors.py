@@ -20,6 +20,10 @@ class ObdCancelled(ObdError):
         super().__init__(message)
 
 
+class ObdStopped(ObdError):
+    """The person pressed Stop and the read has data worth keeping. Raised and caught inside the reader."""
+
+
 class ObdProtocolError(ObdError):
     pass
 

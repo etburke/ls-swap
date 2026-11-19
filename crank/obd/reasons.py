@@ -6,8 +6,9 @@ REASON_TEXT = {
     "refused": "refused by the PCM",
     "busy": "PCM busy",
     "no_answer": "no answer",
+    "stopped": "not read, stopped by you",
 }
-_ORDER = ("refused", "busy", "no_answer", "not_in_map")      # the worrying ones first
+_ORDER = ("refused", "busy", "no_answer", "stopped", "not_in_map")      # the worrying ones first
 
 
 def describe_unavailable(items) -> str:
