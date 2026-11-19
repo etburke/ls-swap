@@ -1,4 +1,6 @@
 """The Case page: vehicle profile, quick add, hypotheses board, timeline, hand-off report."""
+import os
+import time
 from dataclasses import asdict, fields
 
 import streamlit as st
@@ -101,19 +103,53 @@ def pick_obd_source(key: str):
     return ("serial", dict(ports)[choice])
 
 
+def obd_panel(ctrl, source, key: str, label: str, full_width: bool = False) -> None:
+    """The start button, the running indicator with Stop and Cancel, and the last read's result.
+
+    The result shows only on the session the read was started on, and stays until the next read starts."""
+    job = ctrl.obd_job
+    running = bool(job and job.running)
+    if st.button(label, key=key, use_container_width=full_width, disabled=source is None or running):
+        err = ctrl.start_obd(source)
+        if err:
+            st.error(err)
+            return
+        job = ctrl.obd_job
+        job.join(0.5)                                 # a quick read finishes before the page is drawn
+    if job is None or job.session_name != ctrl.session_name:
+        return
+    if job.running:
+        st.info(f"Reading from the vehicle… {job.seconds:.0f} s")
+        c1, c2 = st.columns(2)
+        if c1.button("Stop (keep what was read)", key=f"{key}_stop", use_container_width=True):
+            ctrl.stop_obd()
+            job.join(2.0)
+        if c2.button("Cancel", key=f"{key}_cancel", use_container_width=True):
+            ctrl.cancel_obd()
+            job.join(2.0)
+        if job.running:
+            refresh = float(os.environ.get("CRANK_REMOTE_REFRESH_S", "1"))
+            if refresh > 0:                           # tests set 0 to render once instead of polling
+                time.sleep(refresh)
+                st.rerun()
+            return
+    if job.state in ("done", "stopped"):
+        st.success("Recorded in the case:" if job.state == "done"
+                   else "Stopped; kept what was read. Recorded in the case:")
+        for line in job.readout.lines():
+            st.write("- " + line)
+    elif job.state == "cancelled":
+        st.warning(job.message)
+    elif job.state == "error":
+        st.error(job.message)
+
+
 def _obd():
     st.subheader("Read from the vehicle (OBD-II)")
     st.caption("A read adds the codes, freeze frame and live values to the case; it never clears codes. "
                "Real-adapter reads are recorded as real, not simulated.")
     source = pick_obd_source("obd")
-    if st.button("Read from OBD", key="obd_read", disabled=source is None):
-        readout, err = get_controller().read_obd(source)
-        if err:
-            st.error(err)
-        else:
-            st.success("Recorded in the case:")
-            for line in readout.lines():
-                st.write("- " + line)
+    obd_panel(get_controller(), source, "obd_read", "Read from OBD")
 
 
 def _board(case, last_codes):

@@ -1,9 +1,12 @@
 import os
+import threading
+import time
 
 import pytest
 from streamlit.testing.v1 import AppTest
 
 from crank.controller import get_controller, reset_controller
+from crank.obd.transport import SimTransport
 
 APP = os.path.join(os.path.dirname(__file__), "..", "app.py")
 
@@ -345,3 +348,87 @@ def test_change_entry_can_name_its_before_and_after_captures(at):
     at.button(key="qa_add").click().run()
     ev = next(e for e in _case().events() if e.type == "change")
     assert ev.refs == {"before": ids[0], "after": ids[1]}
+
+
+def _waiting_read(monkeypatch, after=0):
+    """Make the next OBD read wait once `after` commands were sent. Returns the event that lets it go on.
+    after=0 waits before the PCM has answered anything; after=11 waits right after the first 0100 answer."""
+    gate = threading.Event()
+
+    class Waiting(SimTransport):
+        def send(self, cmd, timeout=5.0):
+            if self.n >= after:
+                while not gate.is_set():
+                    self.check_cancel()
+                    time.sleep(0.01)
+            return super().send(cmd, timeout)
+    monkeypatch.setattr(get_controller(), "_obd_transport", lambda source: Waiting("healthy"))
+    return gate
+
+
+def test_case_page_shows_a_running_read_and_cancel_records_nothing(at, monkeypatch):
+    gate = _waiting_read(monkeypatch)
+    try:
+        at.button(key="obd_read").click().run()
+        assert not at.exception
+        assert any("Reading from the vehicle" in i.value for i in at.info)
+        at.run()                                           # the next poll: the button is drawn disabled
+        assert at.button(key="obd_read").disabled
+        at.button(key="obd_read_cancel").click().run()
+        assert any("Read cancelled; nothing was recorded." in w.value for w in at.warning)
+        assert get_controller().case().events() == []
+        at.run()
+        assert not at.button(key="obd_read").disabled
+    finally:
+        gate.set()
+
+
+def test_case_page_stop_keeps_what_was_read(at, monkeypatch):
+    gate = _waiting_read(monkeypatch, after=11)
+    try:
+        at.button(key="obd_read").click().run()
+        assert any("Reading from the vehicle" in i.value for i in at.info)
+        threading.Timer(0.3, gate.set).start()             # the command in flight finishes, then it stops
+        at.button(key="obd_read_stop").click().run()
+        assert any("Stopped; kept what was read" in s.value for s in at.success)
+        events = [e for e in get_controller().case().events() if e.type == "code_read"]
+        assert len(events) == 1 and events[0].data["stopped"] is True
+    finally:
+        gate.set()
+
+
+def test_stop_before_the_pcm_answers_cancels_on_the_case_page(at, monkeypatch):
+    gate = _waiting_read(monkeypatch)
+    try:
+        at.button(key="obd_read").click().run()
+        at.button(key="obd_read_stop").click().run()
+        assert any("Read cancelled" in w.value for w in at.warning)
+        assert get_controller().case().events() == []
+    finally:
+        gate.set()
+
+
+def test_phone_remote_shows_a_running_read_with_both_buttons_and_cancel_stops_it(at, monkeypatch):
+    gate = _waiting_read(monkeypatch)
+    try:
+        at.query_params["page"] = "remote"
+        at.run()
+        at.button(key="remote_obd").click().run()
+        assert any("Reading from the vehicle" in i.value for i in at.info)
+        assert at.button(key="remote_obd_stop") and at.button(key="remote_obd_cancel")
+        at.button(key="remote_obd_cancel").click().run()
+        assert any("Read cancelled" in w.value for w in at.warning)
+        assert get_controller().case().events() == []
+    finally:
+        gate.set()
+
+
+def test_a_finished_read_is_not_shown_on_another_session(at):
+    at.selectbox(key="obd_scenario").select("p2119_zero_rpm").run()
+    at.button(key="obd_read").click().run()
+    assert any("Recorded in the case" in s.value for s in at.success)
+    get_controller().store.open("other")
+    at.run()
+    at.sidebar.selectbox(key="session_pick").select("other").run()
+    assert not at.exception
+    assert not any("Recorded in the case" in s.value for s in at.success)
