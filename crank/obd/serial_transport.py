@@ -8,7 +8,7 @@ import time
 
 from . import allowlist
 from .errors import ObdCancelled, ObdNoAdapter, ObdTimeout
-from .transport import Transport
+from .transport import StreamEnd, Transport
 
 BAUD_FALLBACK = 38400
 
@@ -75,6 +75,79 @@ class SerialTransport(Transport):
             except OSError as e:
                 raise ObdNoAdapter(f"The adapter connection dropped: {e}.") from e
         return buf.split(b">", 1)[0].decode("ascii", errors="replace")
+
+    def stream(self, cmd, on_line, stop, max_seconds, silence_s=1.0) -> StreamEnd:
+        """Run a monitor command and hand each line to `on_line`. Ends on stop, time, silence, or when the
+        adapter itself ends it; our own endings stop the monitor with one space (never a bare CR, which
+        would repeat the command) and resync."""
+        norm = allowlist.check(cmd)
+        if self._ser is None:
+            raise ObdNoAdapter("The adapter is not open.")
+        self.check_cancel()
+        ours = ("stopped", "time", "silent")
+        with self._lock:
+            try:
+                try:
+                    end = self._read_stream(norm, on_line, stop, max_seconds, silence_s)
+                except ObdCancelled:
+                    self._stop_monitor()                  # never leave the adapter monitoring
+                    raise
+                if end.reason in ours:
+                    self._stop_monitor()
+            except OSError as e:
+                raise ObdNoAdapter(f"The adapter connection dropped: {e}.") from e
+        if end.reason in ours:
+            self._resync()
+        return end
+
+    def _read_stream(self, norm, on_line, stop, max_seconds, silence_s) -> StreamEnd:
+        self._ser.reset_input_buffer()
+        self._ser.write(norm.encode() + b"\r")
+        buf, start = b"", time.monotonic()
+        last_line = start
+        while True:
+            tail = buf.decode("ascii", errors="replace").strip()
+            if stop.is_set():
+                return StreamEnd("stopped", tail)
+            self.check_cancel()
+            now = time.monotonic()
+            if now - start >= max_seconds:
+                return StreamEnd("time", tail)
+            if now - last_line >= silence_s:
+                return StreamEnd("silent", tail)
+            buf += self._ser.read(max(1, self._ser.in_waiting or 0))
+            *lines, buf = buf.split(b"\r")
+            for raw in lines:
+                line = raw.decode("ascii", errors="replace").strip()
+                if not line or line == norm:
+                    continue
+                if "BUFFER FULL" in line:
+                    return StreamEnd("buffer_full")
+                if "LV RESET" in line or line.startswith(("ELM327", "STN")):
+                    return StreamEnd("reset")
+                if line == ">":
+                    return StreamEnd("prompt")
+                last_line = time.monotonic()
+                on_line(time.time(), line)
+                if stop.is_set():
+                    return StreamEnd("stopped")
+            if buf.strip() == b">":
+                return StreamEnd("prompt")
+
+    def _stop_monitor(self, timeout: float = 2.0) -> None:
+        """One space stops monitoring; wait for the prompt. Caller holds the lock."""
+        self._ser.write(b" ")
+        buf, deadline = b"", time.monotonic() + timeout
+        while b">" not in buf and time.monotonic() < deadline:
+            buf += self._ser.read(max(1, self._ser.in_waiting or 0))
+
+    def _resync(self) -> None:
+        """Confirm the adapter is back to normal: ATI answers with ELM327 (a stray space can draw one '?')."""
+        reply = self.send("ATI", 2.0)
+        if "?" in reply:
+            reply = self.send("ATI", 2.0)
+        if "ELM327" not in reply:
+            raise ObdTimeout("The adapter did not come back after monitoring.")
 
     def close(self) -> None:
         ser, self._ser = self._ser, None

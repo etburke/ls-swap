@@ -2,12 +2,21 @@
 from __future__ import annotations
 
 import copy
+import threading
 import time
+from typing import Callable
 from itertools import zip_longest
 from dataclasses import dataclass, field
 
 from .errors import ObdCancelled, ObdNoAdapter, ObdTimeout
 from .protocol import request
+
+
+@dataclass
+class StreamEnd:
+    """Why a stream ended: stopped | time | silent | prompt | buffer_full | reset. `tail` is any unfinished line."""
+    reason: str
+    tail: str = ""
 
 
 class Transport:
@@ -24,6 +33,10 @@ class Transport:
         raise NotImplementedError
 
     def send(self, cmd: str, timeout: float = 5.0) -> str:
+        raise NotImplementedError
+
+    def stream(self, cmd: str, on_line: Callable[[float, str], None], stop: threading.Event,
+               max_seconds: float, silence_s: float = 1.0) -> StreamEnd:
         raise NotImplementedError
 
     def close(self) -> None:
@@ -54,6 +67,9 @@ class DelegatingTransport(Transport):
 
     def send(self, cmd: str, timeout: float = 5.0) -> str:
         return self.inner.send(cmd, timeout)
+
+    def stream(self, cmd, on_line, stop, max_seconds, silence_s=1.0) -> StreamEnd:
+        return self.inner.stream(cmd, on_line, stop, max_seconds, silence_s)
 
     def close(self) -> None:
         self.inner.close()
@@ -355,4 +371,4 @@ class SimTransport(Transport):
         return "?"
 
 
-__all__ = ["Transport", "DelegatingTransport", "HeldTransport", "SimTransport", "SCENARIOS", "request"]
+__all__ = ["Transport", "StreamEnd", "DelegatingTransport", "HeldTransport", "SimTransport", "SCENARIOS", "request"]

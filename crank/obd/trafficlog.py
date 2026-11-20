@@ -102,6 +102,23 @@ class LoggingTransport(DelegatingTransport):
         self.log.reply(reply, (time.monotonic() - start) * 1000, self._tag())
         return reply
 
+    def stream(self, cmd, on_line, stop, max_seconds, silence_s=1.0):
+        tag, count = self._tag(), [0]
+
+        def counted(ts, line):
+            count[0] += 1
+            on_line(ts, line)
+        self.log.command(cmd, tag)
+        self.log.event("watch stream started", tag)
+        try:
+            end = self.inner.stream(cmd, counted, stop, max_seconds, silence_s)
+        except ObdError as e:
+            self.log.error(e, tag)
+            self.log.event(f"watch stream ended (error, {count[0]} lines)", tag)
+            raise
+        self.log.event(f"watch stream ended ({end.reason}, {count[0]} lines)", tag)
+        return end
+
     def close(self) -> None:
         self.log.event("port close", self._tag())
         self.inner.close()

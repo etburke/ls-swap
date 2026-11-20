@@ -127,3 +127,19 @@ def test_tail_lines_can_hide_heartbeats(tmp_path):
         log.command(f"01{i:02X}")
     shown = tail_lines(log.path, 4, hide_heartbeats=True)
     assert len(shown) == 4 and not any(" hb " in l for l in shown) and ">> 0109" in shown[-1]
+
+
+def test_logging_transport_logs_stream_start_and_end_but_not_frames(tmp_path):
+    class Streamer(SimTransport):
+        def stream(self, cmd, on_line, stop, max_seconds, silence_s=1.0):
+            from crank.obd.transport import StreamEnd
+            on_line(0.0, "0C9 8 00 0C 80 00 00 00 00 00"); on_line(0.1, "1A1 2 01 02")
+            return StreamEnd("time")
+    log = make(tmp_path)
+    t = LoggingTransport(Streamer(), log)
+    got = []
+    end = t.stream("ATMA", lambda ts, l: got.append(l), threading.Event(), max_seconds=1)
+    text = log.path.read_text()
+    assert end.reason == "time" and len(got) == 2
+    assert ">> ATMA" in text and "watch stream started" in text
+    assert "watch stream ended (time, 2 lines)" in text and "0C9" not in text

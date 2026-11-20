@@ -15,13 +15,16 @@ class FakeSerial:
 
     in_waiting = 0
 
-    def __init__(self, replies=None, on_write=None):
+    def __init__(self, replies=None, on_write=None, stream_chunks=None):
         self.written, self.queue, self.closed = [], [], False
+        self.stream_chunks = stream_chunks or []          # served after ATMA is written
         self.replies, self.on_write = replies or {}, on_write
 
     def write(self, data):
         self.written.append(data)
         key = data.decode().strip()
+        if key == "ATMA" and self.stream_chunks:
+            self.queue.extend(self.stream_chunks)
         if self.on_write:
             self.queue.extend(self.on_write(key))
         else:
@@ -223,3 +226,115 @@ def test_a_transport_without_a_cancel_event_sends_as_before():
     f = FakeSerial({"010C": [b"41 0C 0B B8\r\r>"]})
     t = make(f); t.open()
     assert t.cancel is None and t.send("010C", 1.0).strip() == "41 0C 0B B8"
+
+
+def _mon(chunks, ati=None, **kw):
+    """A port that streams `chunks` after ATMA; a stop space gets a prompt; ATI answers like an ELM327."""
+    replies = {"": [b"\r>"], "ATI": ati or [b"ELM327 v1.4b\r\r>"]}
+    f = FakeSerial(on_write=lambda k: replies.get(k, [b"OK\r\r>"]) if k != "ATMA" else [], stream_chunks=chunks, **kw)
+    t = make(f)
+    t.open()
+    return f, t
+
+
+def test_stream_delivers_lines_split_across_reads_and_skips_the_echo():
+    f = FakeSerial(on_write=lambda k: {"ATMA": [b"ATMA\r0C9 8 00 0C", b" 80 00 00 00 00 00\r1A1 2 01 02\r"],
+                                       "": [b"\r>"], "ATI": [b"ELM327 v1.4b\r\r>"]}.get(k, [b"OK\r\r>"]))
+    t = make(f); t.open(); got = []
+    end = t.stream("ATMA", lambda ts, line: got.append(line), threading.Event(), max_seconds=0.3)
+    assert got == ["0C9 8 00 0C 80 00 00 00 00 00", "1A1 2 01 02"]
+    assert end.reason in ("time", "silent")
+    assert b" " in f.written and b"\r" not in f.written      # stop byte is a space; never a bare CR
+    assert f.written[-1] == b"ATI\r"                         # resynced after the stop
+
+
+def test_stop_event_ends_the_stream_with_reason_stopped():
+    f, t = _mon([b"ATMA\r0C9 8 00\r1A1 2 01\r3B0 1 02\r"])
+    stop, got = threading.Event(), []
+
+    def on_line(ts, line):
+        got.append(line)
+        if len(got) == 2:
+            stop.set()
+    end = t.stream("ATMA", on_line, stop, max_seconds=2)
+    assert end.reason == "stopped" and got == ["0C9 8 00", "1A1 2 01"]
+    assert b" " in f.written
+
+
+def test_buffer_full_ends_without_a_stop_byte():
+    f, t = _mon([b"0C9 8 00\rBUFFER FULL\r\r>"])
+    got = []
+    end = t.stream("ATMA", lambda ts, line: got.append(line), threading.Event(), max_seconds=1)
+    assert end.reason == "buffer_full" and b" " not in f.written and got == ["0C9 8 00"]
+
+
+def test_adapter_returning_to_the_prompt_ends_with_reason_prompt():
+    f, t = _mon([b"0C9 8 00\r\r>"])
+    end = t.stream("ATMA", lambda ts, line: None, threading.Event(), max_seconds=1)
+    assert end.reason == "prompt" and b" " not in f.written
+
+
+def test_reset_banner_mid_stream_ends_with_reason_reset():
+    f, t = _mon([b"0C9 8 00\r", b"\rELM327 v1.4b\r"])
+    end = t.stream("ATMA", lambda ts, line: None, threading.Event(), max_seconds=1)
+    assert end.reason == "reset" and b" " not in f.written
+
+
+def test_lv_reset_line_ends_with_reason_reset():
+    f, t = _mon([b"LV RESET\r"])
+    end = t.stream("ATMA", lambda ts, line: None, threading.Event(), max_seconds=1)
+    assert end.reason == "reset" and b" " not in f.written
+
+
+def test_silence_ends_the_stream_with_reason_silent():
+    f, t = _mon([b"0C9 8 00\r"])
+    end = t.stream("ATMA", lambda ts, line: None, threading.Event(), max_seconds=3, silence_s=0.1)
+    assert end.reason == "silent" and b" " in f.written
+
+
+def test_a_stray_space_is_cleared_by_resending_ati():
+    f, t = _mon([b"0C9 8 00\r"], ati=[b"?\r\r>", b"ELM327 v1.4b\r\r>"])
+    t.stream("ATMA", lambda ts, line: None, threading.Event(), max_seconds=0.1)
+    assert [w for w in f.written if w.startswith(b"ATI")][-2:] == [b"ATI\r", b"ATI\r"]
+
+
+def test_adapter_that_does_not_come_back_raises_timeout():
+    f, t = _mon([b"0C9 8 00\r"], ati=[b"?\r\r>", b"?\r\r>"])
+    with pytest.raises(ObdTimeout):
+        t.stream("ATMA", lambda ts, line: None, threading.Event(), max_seconds=0.1)
+
+
+def test_stream_refuses_an_unlisted_command():
+    f = FakeSerial()
+    t = make(f); t.open()
+    before = len(f.written)
+    with pytest.raises(ObdForbiddenCommand):
+        t.stream("STMA", lambda ts, line: None, threading.Event(), max_seconds=1)
+    assert len(f.written) == before
+
+
+def test_link_drop_mid_stream_raises_no_adapter():
+    f, t = _mon([b"0C9 8 00\r", OSError("gone")])
+    with pytest.raises(ObdNoAdapter):
+        t.stream("ATMA", lambda ts, line: None, threading.Event(), max_seconds=1)
+
+
+def test_cancel_mid_stream_stops_the_monitor_then_raises():
+    f, t = _mon([b"0C9 8 00\r"])
+    t.cancel = threading.Event()
+    got = []
+
+    def on_line(ts, line):
+        got.append(line)
+        t.cancel.set()
+    with pytest.raises(ObdCancelled):
+        t.stream("ATMA", on_line, threading.Event(), max_seconds=1)
+    assert got and b" " in f.written
+
+
+def test_held_transport_passes_stream_through():
+    from crank.obd.transport import HeldTransport
+    f, t = _mon([b"0C9 8 00\r"])
+    got = []
+    end = HeldTransport(t).stream("ATMA", lambda ts, line: got.append(line), threading.Event(), max_seconds=0.1)
+    assert got == ["0C9 8 00"] and end.reason in ("time", "silent")
