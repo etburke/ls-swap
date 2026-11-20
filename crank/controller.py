@@ -301,4 +301,7 @@ def get_controller() -> Controller:
 def reset_controller() -> None:
     global _controller
     with _guard:
+        if _controller is not None and _controller.mcp is not None:
+            from .mcp_server import stop_mcp_server           # imported here: mcp_server never imports this module
+            stop_mcp_server(_controller)
         _controller = None
