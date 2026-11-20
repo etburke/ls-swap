@@ -30,6 +30,35 @@ class Transport:
         pass
 
 
+class DelegatingTransport(Transport):
+    """A transport that passes everything to another one. `sim` and `cancel` read and write through, so
+    whoever sets `cancel` on the wrapper reaches the real transport that is waiting."""
+
+    def __init__(self, inner: Transport):
+        self.inner = inner
+
+    @property
+    def sim(self) -> bool:
+        return self.inner.sim
+
+    @property
+    def cancel(self):
+        return self.inner.cancel
+
+    @cancel.setter
+    def cancel(self, value) -> None:
+        self.inner.cancel = value
+
+    def open(self) -> None:
+        self.inner.open()
+
+    def send(self, cmd: str, timeout: float = 5.0) -> str:
+        return self.inner.send(cmd, timeout)
+
+    def close(self) -> None:
+        self.inner.close()
+
+
 def _enc_pid_bitmap(pids: set[int], base: int) -> bytes:
     out = bytearray(4)
     for p in pids:
@@ -316,4 +345,4 @@ class SimTransport(Transport):
         return "?"
 
 
-__all__ = ["Transport", "SimTransport", "SCENARIOS", "request"]
+__all__ = ["Transport", "DelegatingTransport", "SimTransport", "SCENARIOS", "request"]
