@@ -236,3 +236,132 @@ def test_reanalyze_validates_thresholds(ctrl, tools):
         tools.reanalyze_capture(cid, {"hi": float("nan")})
     teeth = tools.reanalyze_capture(cid, {"teeth": 58.0})["thresholds"]["teeth"]
     assert teeth == 58 and type(teeth) is int                        # integer fields stay integers
+
+
+GATED_CONTROL = [
+    lambda t: t.arm_capture(),
+    lambda t: t.cancel_capture(),
+    lambda t: t.obd_connect("sim:healthy"),
+    lambda t: t.obd_disconnect(),
+    lambda t: t.obd_relink(),
+    lambda t: t.obd_read("sim:healthy"),
+    lambda t: t.obd_stop(),
+    lambda t: t.obd_cancel(),
+]
+
+
+@pytest.mark.parametrize("call", GATED_CONTROL)
+def test_control_tools_refuse_while_ai_control_is_off(ctrl, tools, call):
+    with pytest.raises(ToolError, match="AI control is off"):
+        call(tools)
+    assert ctrl.job is None and ctrl.obd_job is None and ctrl.connection.state == "disconnected"
+
+
+def test_arm_capture_labels_the_capture_as_ai_and_the_laptop_sees_it(ctrl, tools):
+    ctrl.ai_control = True
+    ctrl.sync(mode="Simulator", scenario="ref_sag", session_name="bench")
+    r = tools.arm_capture("after reground", "note")
+    assert r["armed"] is True and r["label"] == "[AI] after reground" and "simulator" in r["message"].lower()
+    ctrl.job.join(30)
+    p = tools.get_capture_progress()
+    assert p["state"] == "done" and p["saved_id"] == "001"
+    assert tools.list_captures()["captures"][0]["label"] == "[AI] after reground"
+    assert ctrl.case().events()[-1].text == "[AI] after reground"
+    assert tools.arm_capture()["label"] == "[AI] capture"             # no label given
+    ctrl.job.join(30)
+
+
+def test_arm_capture_in_real_mode_without_a_scope_says_so(ctrl, tools):
+    ctrl.ai_control = True
+    ctrl.sync(mode="Real scope")
+    with pytest.raises(ToolError, match="Connect to the scope"):
+        tools.arm_capture()
+    assert ctrl.job is None
+
+
+def test_arm_while_a_capture_is_running_is_refused_and_cancel_works(ctrl, tools):
+    ctrl.ai_control = True
+    ctrl.sim_fault = "stuck_waiting"
+    ctrl.sync(mode="Simulator", scenario="healthy", session_name="bench")
+    tools.arm_capture()
+    try:
+        with pytest.raises(ToolError, match="already running"):
+            tools.arm_capture()
+        assert tools.cancel_capture()["cancelled"] is True
+    finally:
+        ctrl.cancel()
+        ctrl.job.join(5)
+    assert tools.get_capture_progress()["state"] == "cancelled"
+    assert tools.cancel_capture() == {"cancelled": False, "message": "No capture is running."}
+
+
+def test_turning_control_off_mid_capture_blocks_new_calls_but_not_progress(ctrl, tools):
+    ctrl.ai_control = True
+    ctrl.sim_fault = "stuck_waiting"
+    ctrl.sync(mode="Simulator", scenario="healthy", session_name="bench")
+    tools.arm_capture()
+    ctrl.ai_control = False
+    try:
+        assert tools.get_capture_progress()["running"] is True        # still readable
+        assert tools.get_status()["ai_control"] is False
+        with pytest.raises(ToolError, match="AI control is off"):
+            tools.cancel_capture()
+        assert ctrl.running                                           # and the capture was not cancelled
+    finally:
+        ctrl.cancel()
+        ctrl.job.join(5)
+
+
+def test_obd_connect_read_and_disconnect_on_the_simulator(ctrl, tools):
+    ctrl.ai_control = True
+    ctrl.sync(session_name="bench")
+    assert tools.obd_connect("sim:healthy")["state"] == "connected"
+    try:
+        assert tools.obd_read()["started"] is True                    # default source: the open connection
+        ctrl.obd_job.join(30)
+        p = tools.obd_progress()
+        assert p["state"] == "done" and "get_case_summary" in p["note"]
+        assert [e.type for e in ctrl.case().events()].count("code_read") == 1
+    finally:
+        assert tools.obd_disconnect()["state"] == "disconnected"
+
+
+def test_obd_read_without_a_connection_uses_its_own_port(ctrl, tools):
+    ctrl.ai_control = True
+    ctrl.sync(session_name="bench")
+    tools.obd_read("sim:healthy")
+    ctrl.obd_job.join(30)
+    assert tools.obd_progress()["state"] == "done"
+    with pytest.raises(ToolError, match="connection is closed"):
+        tools.obd_read()                                              # 'connection' but nothing is connected
+
+
+@pytest.mark.parametrize("source, match", [
+    ("bogus", "source must be"), ("sim:", "source must be"), ("serial:", "source must be"),
+    ("sim:no_such_scenario", "Unknown simulator scenario"), ("connection", "obd_connect needs"),
+])
+def test_obd_sources_are_validated(ctrl, tools, source, match):
+    ctrl.ai_control = True
+    with pytest.raises(ToolError, match=match):
+        tools.obd_connect(source)
+    assert ctrl.connection.state == "disconnected"
+
+
+def test_obd_cancel_throws_a_slow_read_away_and_records_nothing(ctrl, tools):
+    ctrl.ai_control = True
+    ctrl.sync(session_name="bench")
+    tools.obd_read("sim:slow_adapter")
+    try:
+        with pytest.raises(ToolError, match="already running"):
+            tools.obd_read("sim:healthy")                             # a second read is refused
+    finally:
+        assert tools.obd_cancel()["state"] in ("running", "cancelled")
+        ctrl.obd_job.join(10)
+    assert tools.obd_progress()["state"] == "cancelled"
+    assert ctrl.case().events() == []
+
+
+def test_obd_relink_without_a_connection_explains(ctrl, tools):
+    ctrl.ai_control = True
+    with pytest.raises(ToolError, match="Nothing to relink"):
+        tools.obd_relink()

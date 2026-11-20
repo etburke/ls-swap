@@ -14,7 +14,9 @@ from mcp.server.mcpserver.exceptions import ToolError
 from .analysis import Analysis, analyze_capture
 from .case import Case, capture_snapshot
 from .model import Thresholds
+from .obd.errors import ObdError
 from .obd.trafficlog import tail_lines
+from .obd.transport import SCENARIOS as OBD_SCENARIOS
 from .render import to_html, to_markdown
 from .report import decimate
 from .summary import build_summary
@@ -111,6 +113,21 @@ class Tools:
                 raise ToolError(f"Threshold {key!r} must be a finite number.")
             out[key] = int(value) if valid[key].type in (int, "int") else float(value)
         return out
+
+    @staticmethod
+    def _obd_source(source: str):
+        """'sim:<scenario>' -> the scenario name, 'serial:<port|auto>' -> ("serial", value), 'connection' as is."""
+        if source == "connection":
+            return "connection"
+        kind, _, value = source.partition(":")
+        if kind == "sim" and value:
+            if value not in OBD_SCENARIOS:
+                raise ToolError(f"Unknown simulator scenario {value!r}. Scenarios: {', '.join(sorted(OBD_SCENARIOS))}.")
+            return value
+        if kind == "serial" and value:
+            return ("serial", value)
+        raise ToolError("source must be 'sim:<scenario>', 'serial:<port or auto>' or 'connection' "
+                        "(the open connection).")
 
     def _obd_state(self) -> dict:
         job = self.ctrl.obd_job
@@ -268,3 +285,89 @@ class Tools:
         th = dataclasses.replace(self.ctrl.thresholds, **self._overrides(thresholds or {}))
         return {"saved": False, "capture": capture_id, "thresholds": jsonable(dataclasses.asdict(th)),
                 **analysis_dict(analyze_capture(data, th))}
+
+    # -- control (need Allow AI control)
+    def arm_capture(self, label: str = "", note: str = "") -> dict[str, Any]:
+        """Arm the scope for one capture in the laptop's current session, mode, scenario and settings. The
+        capture is labeled "[AI] ...". In real-scope mode the scope waits for the first crank edge, so tell
+        the owner to crank the engine; this tool only arms. Poll get_capture_progress for the result."""
+        self._gate()
+        c = self.ctrl
+        full = AI_LABEL + (label.strip() or "capture")
+        err = c.arm(full, note)
+        if err:
+            raise ToolError(err)
+        sim = c.mode == "Simulator"
+        return {"armed": True, "label": full, "session": c.session_name, "mode": c.mode,
+                "scenario": c.scenario if sim else None,
+                "message": ("Armed in simulator mode: no cranking is needed, the simulated capture finishes by "
+                            "itself. Poll get_capture_progress." if sim else
+                            "Armed. Tell the owner to crank the engine now; the scope waits for the first crank "
+                            "edge. Poll get_capture_progress.")}
+
+    def cancel_capture(self) -> dict[str, Any]:
+        """Cancel the running capture and disarm the scope."""
+        self._gate()
+        if not self.ctrl.running:
+            return {"cancelled": False, "message": "No capture is running."}
+        self.ctrl.cancel()
+        return {"cancelled": True, "message": "Cancel requested; poll get_capture_progress."}
+
+    def obd_connect(self, source: str) -> dict[str, Any]:
+        """Hold the OBD adapter open between reads. source is 'sim:<scenario>' (simulator) or
+        'serial:<port or auto>' (a real adapter). Returns the connection status."""
+        self._gate()
+        src = self._obd_source(source)
+        if src == "connection":
+            raise ToolError("obd_connect needs 'sim:<scenario>' or 'serial:<port or auto>'.")
+        try:
+            err = self.ctrl.connect(src)
+        except ObdError as e:
+            raise ToolError(str(e)) from e
+        if err:
+            raise ToolError(err)
+        return jsonable(self.ctrl.connection_status())
+
+    def obd_disconnect(self) -> dict[str, Any]:
+        """Close the held adapter connection."""
+        self._gate()
+        self.ctrl.disconnect()
+        return jsonable(self.ctrl.connection_status())
+
+    def obd_relink(self) -> dict[str, Any]:
+        """Open a dropped connection again with the same source."""
+        self._gate()
+        try:
+            err = self.ctrl.relink()
+        except ObdError as e:
+            raise ToolError(str(e)) from e
+        if err:
+            raise ToolError(err)
+        return jsonable(self.ctrl.connection_status())
+
+    def obd_read(self, source: str = "connection") -> dict[str, Any]:
+        """Start one read-only OBD-II read (stored, pending and permanent codes, freeze frame, live values)
+        into the current case, in the background. source is 'connection' (the open connection, the default),
+        'sim:<scenario>' or 'serial:<port or auto>'. Only read requests are ever sent; trouble codes are never
+        cleared. Poll obd_progress, then call get_case_summary."""
+        self._gate()
+        try:
+            err = self.ctrl.start_obd(self._obd_source(source))
+        except ObdError as e:
+            raise ToolError(str(e)) from e
+        if err:
+            raise ToolError(err)
+        return {"started": True, "session": self.ctrl.session_name,
+                "message": "Read started in the background. Poll obd_progress; the result goes into the case."}
+
+    def obd_stop(self) -> dict[str, Any]:
+        """End the running read and keep what was read so far (acts as cancel before the PCM has answered)."""
+        self._gate()
+        self.ctrl.stop_obd()
+        return jsonable(self._obd_state())
+
+    def obd_cancel(self) -> dict[str, Any]:
+        """Throw the running read away; nothing is recorded."""
+        self._gate()
+        self.ctrl.cancel_obd()
+        return jsonable(self._obd_state())
