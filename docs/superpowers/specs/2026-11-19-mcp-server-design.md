@@ -38,12 +38,12 @@ An MCP client on the same machine can inspect and analyze every saved session, a
 
 ### Components
 
-**`crank/mcp_server.py`** (new, no UI code). Builds a FastMCP server (the official `mcp` SDK, streamable HTTP, path `/mcp`) whose tools call the shared `Controller` and the existing pure modules. Exposes:
+**`crank/mcp_server.py`** (new, no UI code). Registers the tools on an `MCPServer` (the official `mcp` SDK 2.x, `from mcp.server.mcpserver import MCPServer`; streamable HTTP, path `/mcp`). The tools themselves are the methods of one `Tools` class in **`crank/mcp_tools.py`**, written over the shared `Controller` and the existing pure modules; tool failures are the SDK's `ToolError` (a plain exception loses its message over the protocol). `mcp_server.py` exposes:
 
-- `build_server(ctrl) -> FastMCP`: registers the tools. Tool bodies are plain functions in this module so tests can call them directly.
-- `ensure_mcp_server(ctrl, port=None) -> McpStatus`: starts the server once per process and returns its status (`running`, `port_busy`, `error`, with the URL). A module-level lock and singleton make repeated calls from Streamlit reruns no-ops. The server runs in a daemon thread with uvicorn bound to `127.0.0.1`, port from `CRANK_MCP_PORT` (default 8765). If the port is taken it returns `port_busy` and the app carries on.
+- `build_server(ctrl) -> MCPServer`: registers `Tools(ctrl)`'s methods. The methods can be called directly in tests.
+- `ensure_mcp_server(ctrl, port=None) -> McpStatus`: starts the server once per process and returns its status (`running`, `port_busy`, `error`, with the URL). The handle lives on `Controller.mcp` (so a module reload cannot lose it) and a lock makes repeated calls from Streamlit reruns no-ops. `CRANK_MCP_PORT=0` means a free port (used by tests), `stop_mcp_server(ctrl)` stops it, and `reset_controller()` stops it too. The server runs in a daemon thread with uvicorn bound to `127.0.0.1`, port from `CRANK_MCP_PORT` (default 8765). If the port is taken it returns `port_busy` and the app carries on.
 
-**`app.py`.** Calls `ensure_mcp_server(ctrl)` after `get_controller()` and shows an "AI access" sidebar block: status, the URL, the copyable `claude mcp add --transport http ls-swap <url>` line, and the **Allow AI control** toggle (default off, bound to `ctrl.ai_control`).
+**`app.py`.** Calls `ensure_mcp_server(ctrl)` after `get_controller()` and shows an "AI access" sidebar block: status, the URL, the copyable `claude mcp add --transport http ls-swap <url>` line, and the **Allow AI control** toggle (default off). The toggle writes to `ctrl.ai_control` only when the user flips it (`on_change`), so a stale second tab cannot turn control back on.
 
 **`Controller`.** Gains `ai_control: bool = False`. No other behavior changes; the MCP layer calls the existing public methods (`arm`, `cancel`, `connect`, `disconnect`, `relink`, `start_obd`, `cancel_obd`, `stop_obd`, `snapshot`, `connection_status`, `case`).
 
@@ -62,24 +62,30 @@ Waveforms are never returned raw. All tools return compact JSON; failures are MC
 | `get_case_report(session?, format="markdown")` | `render.to_markdown` | hand-off report text |
 | `list_captures(session?)` | `Session.list_captures` | id, label, time, simulated flag, verdict headline |
 | `get_capture_analysis(capture_id, session?)` | `load_capture` + `analysis` | ranked findings with evidence, summary numbers, event table, thresholds used |
-| `get_capture_signal(capture_id, channel, start?, end?, max_points=2000)` | `CaptureData` | downsampled window of one channel. Window and point count are capped, and the limits are in the error text. |
+| `get_capture_signal(capture_id, channel, start?, end?, max_points=2000)` | `CaptureData` | downsampled window of one channel using the existing `report.decimate` min/max envelope. Window and point count are capped (the limits are in the error text), and `nan_samples` counts invalid samples. |
 | `compare_captures(a, b, session?)` | both analyses | findings and key numbers side by side, differences called out |
 | `reanalyze_capture(capture_id, thresholds?, session?)` | `analysis` | verdict under different thresholds. Not saved; a what-if. |
 | `get_status` | `snapshot`, `connection_status`, OBD job | mode, scenario, current session, capture and OBD job state, scope and adapter state, whether AI control is on |
 | `get_obd_log(lines=100, session?)` | `trafficlog` | tail of the adapter log |
+
+**Progress (always available, so a result stays readable after the toggle goes off)**
+
+| Tool | Backed by | Returns |
+|---|---|---|
+| `get_capture_progress` | `Controller.snapshot` | armed, capturing, downloading, or done with the new capture id and findings |
+| `obd_progress` | the OBD job | state, seconds, message; for a finished read, a pointer to `get_case_summary` |
 
 **Control and write (require Allow AI control)**
 
 | Tool | Backed by | Notes |
 |---|---|---|
 | `arm_capture(label?, note?)` | `Controller.arm` | Returns at once ("armed, waiting for the crank"). Label is prefixed `[AI]`. Uses the laptop's current session, mode, scenario and settings. |
-| `get_capture_progress` | `Controller.snapshot` | armed, capturing, downloading, or done with the new capture id and findings |
 | `cancel_capture` | `Controller.cancel` | |
 | `obd_connect(source)`, `obd_disconnect`, `obd_relink` | `connect`, `disconnect`, `relink` | `source` is `sim:<scenario>` or `serial:<port\|auto>`, as the UI already does |
 | `obd_read(source)` | `start_obd` | Starts the background read and returns. Same read-only allowlist and real-vs-simulated case check as the UI. |
-| `obd_progress`, `obd_stop`, `obd_cancel` | job methods | Stop keeps partial results; cancel records nothing |
+| `obd_stop`, `obd_cancel` | job methods | Stop keeps partial results; cancel records nothing |
 | `add_case_note(type, text)` | `Case.append(source="mcp")` | `type` limited to observation, symptom and change. Current session. |
-| `set_suspect(title, status, reason?)` | `Case.set_hypothesis(source="mcp")` | status open, ruled_out or confirmed. Current session. |
+| `set_suspect(title, status, reason?)` | `Case.set_hypothesis(source="mcp")` | status open, ruled_out or confirmed. Matches an existing suspect by title (case-insensitive) and updates it, otherwise adds one. Current session. |
 
 There are no edit or delete tools: AI entries are additions to the append-only log and cannot rewrite the owner's record. The control tools take no `session` argument because `Controller.arm` and `start_obd` always act on the controller's current session. The tool descriptions state this, and that the crank itself is always the owner's job.
 
@@ -115,4 +121,4 @@ All without hardware, in the style of the existing suite.
 
 ## Documentation
 
-A README section: the sidebar block, the `claude mcp add` line, the tool table, the localhost-only and toggle rules, and a caveat that the control tools are not checked with a real scope and adapter (#3). The code layout list gains `crank/mcp_server.py`. `requirements.txt` gains `mcp`.
+A README section: the sidebar block, the `claude mcp add` line, the tool table, the localhost-only and toggle rules, and a caveat that the control tools are not checked with a real scope and adapter (#3). The code layout list gains `crank/mcp_server.py`. `requirements.txt` gains `mcp>=2.3,<3`.

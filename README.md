@@ -138,6 +138,36 @@ simulator's `elm_clone` and `flaky_adapter_id` scenarios exercise it. Not yet ch
 
 **The log.** Every command and reply the adapter sees, every error and every connection or read event is written to `logs/obd.log` (about 5 MB per file, three files kept) and, without the heartbeat lines, to `sessions/<name>/obd.log` for the active session, including reads that were cancelled or failed. Each line has a time, the session, and `>>` (sent), `<<` (received), `!!` (error) or `**` (event); heartbeat lines are tagged `hb` and simulated traffic `sim`. The **Log** page shows the last 200 lines live, with a Pause toggle and a switch to hide heartbeats. The log is diagnostic: it is never part of the case or the report, and a log that cannot be written never stops a read (the sidebar says so).
 
+### AI access (MCP)
+
+While the app runs it also serves an MCP endpoint on this computer only (`http://127.0.0.1:8765/mcp`; set
+`CRANK_MCP_PORT` for another port, and restart the app after changing code). The sidebar's **AI access** block
+shows the URL and the command to add it to Claude Code:
+
+    claude mcp add --transport http ls-swap http://127.0.0.1:8765/mcp
+
+Any MCP client that speaks streamable HTTP can use it. The endpoint is not reachable from the network and has no
+password.
+
+**Always available (read and analyze):** `list_sessions`, `get_status`, `get_case_summary`, `get_case_report`,
+`list_captures`, `get_capture_analysis` (ranked findings with evidence), `get_capture_signal` (a downsampled
+window of one channel; runts survive the downsampling), `compare_captures`, `reanalyze_capture` (a what-if with
+different thresholds; nothing is saved), `get_capture_progress`, `obd_progress`, `get_obd_log`.
+
+**Only while "Allow AI control" is on** (it is off every time the app starts): `arm_capture`, `cancel_capture`,
+`obd_connect`, `obd_disconnect`, `obd_relink`, `obd_read`, `obd_stop`, `obd_cancel`, `add_case_note` and
+`set_suspect`. They act on the laptop's current session, mode, scenario and settings. Arming only arms: in
+Real-scope mode the assistant is told to ask you to crank. OBD reads keep every existing limit (read-only
+requests, never clears codes, real and simulated reads never mix in one case).
+
+Everything the assistant causes is labeled. Captures it arms are labeled `[AI] ...`; notes and suspects it adds
+carry `source: "mcp"`, show **[AI]** in the timeline and report, and the report says so. It cannot edit or delete
+case entries, delete sessions, change the laptop's mode, scenario or thresholds, connect the scope, or send raw
+commands. Turning the toggle off mid-capture does not cancel the capture; it only blocks new control calls.
+
+Not checked against a real scope or adapter yet (#3): the control tools drive the same code the buttons do, and
+are tested against the simulator only.
+
 ## First session at the truck
 
 1. Wire the scope as in the table above. Close any other program holding the scope's USB connection.
@@ -167,12 +197,15 @@ simulator's `elm_clone` and `flaky_adapter_id` scenarios exercise it. Not yet ch
     crank/summary.py     structured, render-agnostic case summary
     crank/obd/           OBD-II: protocol (pure parsing), pids, transport (interface and simulator), reader,
                          connection (held port and heartbeat), trafficlog (the adapter log)
+    crank/mcp_tools.py   the MCP tools: methods over the shared controller (read, gated control and write)
+    crank/mcp_server.py  registers the tools and serves them on 127.0.0.1 from inside the app process
     crank/render.py      Markdown and self-contained HTML reports
     crank/procedure.py   the guided test steps as data
     crank/report.py      text report and Plotly figures
     app.py               Streamlit UI (laptop)
     case_ui.py           the Case page
     conn_ui.py           adapter connection status and buttons, the Log page
+    mcp_ui.py            the sidebar's AI access block and the Allow AI control toggle
     remote.py            phone remote page
     crank_capture.py     command-line front end
     tests/               pytest suite (no hardware needed)
