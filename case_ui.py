@@ -196,7 +196,8 @@ def _timeline(case, events):
     from crank.summary import describe
     for e in reversed(events):
         if e.type in keep:
-            st.markdown(f"`{e.ts[:16].replace('T', ' ') or 'undated'}` {describe(e)}")
+            ai = "**[AI]** " if e.source else ""
+            st.markdown(f"`{e.ts[:16].replace('T', ' ') or 'undated'}` {ai}{describe(e)}")
 
 
 def _signature(case):

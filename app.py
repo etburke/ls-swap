@@ -8,6 +8,7 @@ from crank.analysis import analyze_capture
 from crank.capture import CaptureJob
 from crank.case import Case
 from crank.controller import get_controller, lan_ip
+from crank.mcp_server import ensure_mcp_server
 from crank.model import CaptureSettings, ChannelConfig, Thresholds
 from crank.procedure import STEPS
 from crank.report import build_figure, build_overlay, to_csv
@@ -15,6 +16,7 @@ from crank.scope import RigolScope, ScopeError
 from crank.sim import SCENARIOS
 import case_ui
 import conn_ui
+import mcp_ui
 import remote
 
 NEW_TAB = "＋"                                         # last session tab: shows the create form
@@ -26,6 +28,7 @@ st.set_page_config(page_title="Crank Remote" if is_remote else "Crank Test Harne
                    layout="centered" if is_remote else "wide",
                    initial_sidebar_state="collapsed" if is_remote else "auto")
 ctrl = get_controller()                               # shared by the laptop and phone sessions
+mcp_status = ensure_mcp_server(ctrl)                  # idempotent: one localhost MCP server per app process
 if is_remote:
     remote.render(ctrl)
     st.stop()
@@ -148,6 +151,8 @@ with st.sidebar:
     st.divider()
     st.subheader("OBD adapter")
     conn_ui.connection_panel(ctrl, "obd")
+    st.subheader("AI access")
+    mcp_ui.ai_panel(ctrl, mcp_status)
     st.caption("Phone remote (same Wi-Fi):")
     ip, port = lan_ip(), st.get_option("server.port")
     st.code(f"http://{ip}:{port}/?page=remote", language=None)
