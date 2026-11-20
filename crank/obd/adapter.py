@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass, field
 
 _STN = re.compile(r"STN\d+\s+v\d+(?:\.\d+)+", re.IGNORECASE)
+_VOLTS = re.compile(r"(?<![\w.])(\d{1,2}(?:\.\d+)?)\s*V\b", re.IGNORECASE)   # not the 7 in "ELM327 v1.5"
 
 
 def clean_id(text: str, cmd: str = "") -> str:
@@ -22,6 +23,12 @@ def parse_sti(text: str) -> str:
     An ELM327 clone answers '?', and a bad one may answer anything, so only the shape counts."""
     m = _STN.search(text)
     return m.group(0) if m else ""
+
+
+def parse_voltage(text: str) -> float | None:
+    """The supply voltage in an ATRV reply ('12.4V'), else None. Anything that is not a voltage is a miss."""
+    m = _VOLTS.search(text.replace(">", ""))
+    return float(m.group(1)) if m else None
 
 
 @dataclass

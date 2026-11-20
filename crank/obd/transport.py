@@ -85,6 +85,7 @@ class Scenario:
     other_ecus: dict = field(default_factory=dict)     # header -> {"stored","pending","permanent","unsupported_modes"}
     interleave: bool = False                           # frames from several ECUs alternate on the wire
     search_delay: float = 0.0                          # seconds the first OBD request takes (protocol search)
+    atrv_fail_after: int | None = None                 # ATRV times out after this many answers (heartbeat drop)
     delay: float = 0.0                                 # seconds every reply takes (to try Cancel without hardware)
     error_on: str = ""                                 # an OBD request that draws an adapter error
     error_text: str = ""                               # e.g. "CAN ERROR"
@@ -121,6 +122,7 @@ SCENARIOS = {
                                    other_ecus={"7E9": {"stored": ["P0700"], "unsupported_modes": (0x0A,)}}),
     "slow_search": Scenario(values=LIVE_RUNNING, search_delay=8.0),
     "slow_adapter": Scenario(values=LIVE_RUNNING, delay=1.0),
+    "heartbeat_drop": Scenario(values=LIVE_RUNNING, atrv_fail_after=3),
     "transient_can_error": Scenario(values=LIVE_RUNNING, error_on="010C", error_text="CAN ERROR"),
     "persistent_can_error": Scenario(values=LIVE_RUNNING, error_on="010C", error_text="CAN ERROR",
                                      error_times=99),
@@ -156,6 +158,7 @@ class SimTransport(Transport):
         self.headers = False
         self.searched, self.errors_left = False, self.sc.error_times
         self.nrc_left: dict = {}
+        self.atrv_n = 0
 
     def open(self) -> None:
         if self.sc.fault == "no_adapter":
@@ -222,6 +225,11 @@ class SimTransport(Transport):
             return ADAPTERS[self.sc.adapter]["ATI"]
         if cmd == "ATDPN":
             return self.sc.protocol
+        if cmd == "ATRV":
+            self.atrv_n += 1
+            if self.sc.atrv_fail_after is not None and self.atrv_n > self.sc.atrv_fail_after:
+                raise ObdTimeout("The adapter did not answer. Check it is plugged in and powered.")
+            return "12.4V"
         return "OK"
 
     def _nrc_for(self, owner: str, spec: dict, cmd: str):
