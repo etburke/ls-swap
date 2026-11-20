@@ -78,7 +78,7 @@ New `crank/obd/trafficlog.py`.
 - `LoggingTransport(transport, log)` wraps any transport and records each command and reply with a timestamp and elapsed time, and errors with their type: `2026-11-19T16:02:15.123 [mx_test_2] >> 010C`, `… << 41 0C 0B B8 (43 ms)`, `… !! ObdTimeout: …`. Heartbeat commands carry a `hb` tag.
 - Connection and read events go into the same log: connect, disconnect, relink, dropped, heartbeat miss, read started, finished, cancelled, stopped, failed.
 - Both the standing connection and the per-read path are wrapped, so cancelled and failed reads leave a trace. Simulated traffic is logged and tagged `sim`.
-- Files: `logs/obd.log` (rotates at about 5 MB, keeps 3 files) and `sessions/<name>/obd.log` for lines written while that session is active, without heartbeat lines. The writer holds a lock, and a write error never breaks a read or the heartbeat: it is counted and reported once in the log and in the status.
+- Files: `logs/obd.log` (rotates at about 5 MB, keeps 3 files) and `sessions/<name>/obd.log` for lines written while that session is active, without heartbeat lines. The writer holds a lock, and a write error never breaks a read or the heartbeat: it is counted and reported in the status (the log cannot record its own failure).
 - The log lives outside the case: nothing in `events.jsonl`, the summary or the reports changes. It holds only allowlisted adapter commands and their replies.
 - `tail_lines(path, n)` reads the last `n` lines from the end of the file in blocks, so a large log does not slow the page.
 
