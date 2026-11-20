@@ -158,6 +158,45 @@ def test_cold_connection_runs_init_before_the_protocol_check(tmp_path):
     assert tuple(t.sent[:len(INIT)]) == INIT and t.sent[len(INIT):len(INIT) + 2] == ["0100", "ATDPN"]
 
 
+def stop_soon(job, after=0.2):
+    job.start()
+    time.sleep(after)
+    t0 = time.monotonic()
+    job.stop()
+    job.join(5)
+    return time.monotonic() - t0
+
+
+def test_stop_during_a_slow_0100_ends_at_once_and_never_enters_monitor_mode(tmp_path):
+    job, ses, t = make(tmp_path, "slow_adapter", seconds=5)       # every reply takes 1 s
+    assert stop_soon(job) < 0.5
+    assert job.state == "stopped" and job.frames == 0 and t.sent == ["0100"] and t.cancel is None
+    assert ses.list_watches()[0]["id"] == job.meta["id"] and job.meta["end_reason"] == "stopped"
+
+
+def test_until_during_a_slow_0100_stops_without_monitoring(tmp_path):
+    t0 = time.monotonic()
+    job, _, t = make(tmp_path, "slow_adapter", seconds=5, until=lambda: time.monotonic() - t0 > 0.2)
+    job.start()
+    job.join(5)
+    assert time.monotonic() - t0 < 0.7
+    assert job.state == "stopped" and job.meta["end_reason"] == "until" and t.sent == ["0100"]
+
+
+def test_poll_stop_during_a_slow_first_request_ends_at_once(tmp_path):
+    job, _, _ = make(tmp_path, "slow_adapter", "poll", seconds=5)
+    assert stop_soon(job) < 0.5 and job.state == "stopped" and job.lines == 0
+
+
+def test_poll_monitoring_waits_for_an_010C_value(tmp_path):
+    sim = SimTransport("healthy")
+    sim.sc.no_answer_pids = ("010C",)
+    job = run(tmp_path, "healthy", "poll", seconds=0.3, transport=Recording(sim))
+    _, rows = SessionStore(tmp_path).open("s").load_watch(job.meta["id"])
+    assert job.state == "done" and rows and all(r["reason"] == "no_answer" for r in rows if r["cmd"] == "010C")
+    assert not job.monitoring.is_set()
+
+
 def test_until_predicate_stops_and_keeps(tmp_path):
     holder = {}
     job, ses, _ = make(tmp_path, seconds=5, until=lambda: holder["job"].frames >= 20)

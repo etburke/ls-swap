@@ -67,6 +67,14 @@ def summarize_poll(rows: list[dict], started: float) -> dict:
             "voltage": {"min": min(volts), "max": max(volts)} if volts else None}
 
 
+class _Interrupt:
+    def __init__(self, job: "WatchJob"):
+        self.job = job
+
+    def is_set(self) -> bool:
+        return self.job._interrupted()
+
+
 class WatchJob:
     def __init__(self, transport, mode: str, writer, *, seconds: float | None,
                  until: Callable[[], bool] | None = None, ceiling: float = MAX_SECONDS, cold: bool = False,
@@ -132,8 +140,18 @@ class WatchJob:
             self._until_hit = True
             self._halt.set()
 
-    def _send(self, cmd: str, timeout: float = 5.0) -> str:
+    def _interrupted(self) -> bool:
+        """What the transport polls while it waits: a cancel, or a stop/until before anything was recorded
+        (a slow protocol search must not hold up a stop; there is nothing to keep then)."""
         if self.cancel_event.is_set():
+            return True
+        if self.lines:
+            return False
+        self._check_until()
+        return self._halt.is_set()
+
+    def _send(self, cmd: str, timeout: float = 5.0) -> str:
+        if self._interrupted():
             raise ObdCancelled()
         return self.t.send(cmd, timeout)
 
@@ -161,6 +179,8 @@ class WatchJob:
         self.protocol = clean_id(self._send("ATDPN"), "ATDPN")
         if not P.is_can(self.protocol):
             raise ObdProtocolError(f"Raw watch needs a CAN vehicle; this one answered on protocol {self.protocol}.")
+        if self._interrupted():                      # never enter monitor mode only to leave it at once
+            raise ObdCancelled()
         self._send("ATH1")
         self._changed = True
         for cmd in ("ATCSM1", "ATCAF0", "ATD1"):
@@ -227,8 +247,10 @@ class WatchJob:
             cycle = time.monotonic()
             if cycle >= deadline:
                 return "time"
-            self._record(self._poll_rpm(time.time(), FIRST_TIMEOUT if n == 0 else 5.0))
-            self.monitoring.set()
+            row = self._poll_rpm(time.time(), FIRST_TIMEOUT if n == 0 else 5.0)
+            self._record(row)
+            if row["value"] is not None:
+                self.monitoring.set()                # the PCM is answering 010C: recording for real
             n += 1
             if n % ATRV_EVERY == 0:
                 raw = self._send("ATRV")
@@ -252,11 +274,12 @@ class WatchJob:
 
     def _work(self) -> None:
         state, end_reason, error = "error", "", None
-        self.t.cancel = self.cancel_event
+        self.t.cancel = _Interrupt(self)
         try:
             end_reason = self._run_raw() if self.mode == "raw" else self._run_poll()
         except ObdCancelled:
-            pass
+            if not self.cancel_event.is_set():
+                end_reason = "stopped"               # stop or until before anything was recorded
         except Exception as e:                       # the link dropped, a timeout, or a bug: kept if lines came
             error, end_reason = e, "error"
         self._restore()
