@@ -432,3 +432,77 @@ def test_a_finished_read_is_not_shown_on_another_session(at):
     at.sidebar.selectbox(key="session_pick").select("other").run()
     assert not at.exception
     assert not any("Recorded in the case" in s.value for s in at.success)
+
+
+@pytest.fixture
+def at_conn(tmp_path, monkeypatch):
+    monkeypatch.setenv("CRANK_SESSIONS_DIR", str(tmp_path / "sessions"))
+    monkeypatch.setenv("CRANK_LOGS_DIR", str(tmp_path / "logs"))
+    monkeypatch.setenv("CRANK_HEARTBEAT_S", "0.05")
+    monkeypatch.setenv("CRANK_POLL_S", "0")
+    monkeypatch.setenv("CRANK_REMOTE_REFRESH_S", "0")
+    reset_controller()
+    app = AppTest.from_file(APP, default_timeout=60)
+    app.run()
+    assert not app.exception
+    yield app
+    get_controller().disconnect()
+    reset_controller()
+
+
+def test_sidebar_shows_the_connection_and_its_buttons(at_conn):
+    assert any("Disconnected" in m.value for m in at_conn.sidebar.markdown)
+    assert at_conn.sidebar.button(key="obd_connect").disabled is False
+    assert at_conn.sidebar.button(key="obd_disconnect").disabled is True
+
+
+def test_connect_from_the_sidebar_with_the_simulator_then_disconnect(at_conn):
+    at_conn.sidebar.radio(key="obd_src_mode").set_value("Simulator").run()
+    at_conn.sidebar.button(key="obd_connect").click().run()
+    assert not at_conn.exception
+    assert get_controller().connection_status()["state"] == "connected"
+    assert any("Connected" in m.value for m in at_conn.sidebar.markdown)
+    assert at_conn.sidebar.button(key="obd_connect").disabled is True
+    at_conn.sidebar.button(key="obd_disconnect").click().run()
+    assert get_controller().connection_status()["state"] == "disconnected"
+
+
+def test_a_dropped_connection_shows_dropped_and_relink_brings_it_back(at_conn):
+    ctrl = get_controller()
+    assert ctrl.connect("heartbeat_drop") is None
+    deadline = time.time() + 5
+    while time.time() < deadline and ctrl.connection_status()["state"] != "dropped":
+        time.sleep(0.05)
+    at_conn.run()
+    assert any("Dropped" in m.value for m in at_conn.sidebar.markdown)
+    at_conn.sidebar.button(key="obd_relink").click().run()
+    assert ctrl.connection_status()["state"] == "connected"
+
+
+def test_the_case_page_says_it_uses_the_open_connection(at_conn):
+    get_controller().connect("healthy")
+    at_conn.run()
+    assert any("Using the open connection" in c.value for c in at_conn.caption)
+    at_conn.button(key="obd_read").click().run()
+    assert any("Recorded in the case" in s.value for s in at_conn.success)
+
+
+def test_the_phone_page_shows_the_connection_status(at_conn):
+    at_conn.query_params["page"] = "remote"
+    at_conn.run()
+    assert any("Disconnected" in m.value for m in at_conn.markdown)
+    assert at_conn.button(key="remote_obd_connect")
+
+
+def test_the_log_page_tails_the_log_and_can_hide_heartbeats(at_conn):
+    ctrl = get_controller()
+    ctrl.traffic.event("hello from the test")
+    ctrl.traffic.command("ATRV", tag="hb")
+    at_conn.sidebar.radio(key="page").set_value("Log").run()
+    assert not at_conn.exception
+    code = " ".join(c.value for c in at_conn.code)
+    assert "hello from the test" in code and "hb >> ATRV" not in code     # heartbeats hidden by default
+    at_conn.toggle(key="log_hide_hb").set_value(False).run()
+    assert "hb >> ATRV" in " ".join(c.value for c in at_conn.code)
+    at_conn.toggle(key="log_pause").set_value(True).run()
+    assert not at_conn.exception
