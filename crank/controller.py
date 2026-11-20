@@ -4,15 +4,18 @@ from __future__ import annotations
 import os
 import socket
 import threading
+from pathlib import Path
 
 from .capture import CaptureJob
 from .case import Case
 from .model import CaptureSettings, Thresholds
-from .obd.errors import ObdError
+from .obd.connection import ObdConnection
+from .obd.errors import ObdAdapterError, ObdCancelled, ObdError, ObdVehicleSilent
 from .obd.job import ObdJob
 from .obd.reader import ObdReader
 from .obd.serial_transport import SerialTransport, resolve_port
-from .obd.transport import SimTransport
+from .obd.trafficlog import LoggingTransport, TrafficLog
+from .obd.transport import HeldTransport, SimTransport
 from .scope import RigolScope, SimScope
 from .store import SessionStore
 
@@ -21,7 +24,7 @@ _SEVERITY_ORDER = {"fail": 0, "warn": 1, "info": 2}
 
 
 class Controller:
-    def __init__(self, store: SessionStore, poll_s: float = 0.2):
+    def __init__(self, store: SessionStore, poll_s: float = 0.2, heartbeat_s: float = 5.0, logs_dir=None):
         self.store, self.poll_s = store, poll_s
         self.mode = "Simulator"
         self.scenario = "healthy"
@@ -34,6 +37,8 @@ class Controller:
         self._lock = threading.Lock()
         self._obd_lock = threading.Lock()
         self.obd_job: ObdJob | None = None
+        self.traffic = TrafficLog(logs_dir or Path(store.root).parent / "logs", session=self._log_session)
+        self.connection = ObdConnection(log=self.traffic, heartbeat_s=heartbeat_s, read_lock=self._obd_lock)
 
     def sync(self, **fields) -> None:
         """The laptop UI pushes its current choices here on every run."""
@@ -88,27 +93,71 @@ class Controller:
         use = "the simulator" if have == "real" else "a real adapter"
         return f"This case already has {have} OBD reads. Start a new case to use {use}."
 
+    def _log_session(self):
+        return self.session_name, self.store.open(self.session_name).path
+
+    def _take_obd_lock(self) -> bool:
+        """The read lock, waiting briefly if only the heartbeat has it (a ping lasts a moment)."""
+        if self._obd_lock.acquire(blocking=False):
+            return True
+        if self.connection.pinging:
+            return self._obd_lock.acquire(timeout=3.0)
+        return False
+
+    DROPPED = ("The adapter connection dropped. Press Relink, or Disconnect to read without a standing "
+               "connection.")
+
     def start_obd(self, source="healthy") -> str | None:
         """Start one OBD read into the current case in the background. Returns a message if it could not
-        start, else None. `source` is a simulator scenario name, or ("serial", port | "auto") for a real adapter.
+        start, else None. `source` is a simulator scenario name, or ("serial", port | "auto") for a real adapter;
+        it is ignored while a standing connection is up.
 
         The lock is held until the job ends, so a second read from the phone or another tab is refused."""
-        if not self._obd_lock.acquire(blocking=False):
+        if not self._take_obd_lock():
             return "An OBD read is already running."
         started = False
         try:
-            try:
-                transport = self._obd_transport(source)
-            except ObdError as e:
-                return str(e)
+            conn = self.connection
+            held = conn if conn.state == "connected" else None
+            if conn.state == "dropped":
+                return self.DROPPED
+            if held:
+                transport = HeldTransport(conn.transport)
+            else:
+                if source == "connection":
+                    return "The connection is closed. Press Connect, or pick an adapter."
+                try:
+                    transport = LoggingTransport(self._obd_transport(source), self.traffic)
+                except ObdError as e:
+                    return str(e)
             wrong = self._wrong_kind(transport)
             if wrong:
                 return wrong
             case = self.case()                              # the read goes to the case it was started on
+            adapter = held.adapter if held and not held.cold else None
 
             def run(cancel, stop):
-                readout = ObdReader(transport, cancel=cancel, stop=stop).read()
+                self.traffic.event(f"read started ({'open connection' if held else 'own port'}, "
+                                   f"{'warm' if adapter else 'full setup'})")
+                try:
+                    readout = ObdReader(transport, cancel=cancel, stop=stop, adapter=adapter).read()
+                except ObdCancelled:
+                    self.traffic.event("read cancelled")
+                    if held:
+                        held.mark_cold()
+                    raise
+                except ObdError as e:
+                    self.traffic.event(f"read failed: {e}")
+                    if held:
+                        held.mark_cold()
+                        if isinstance(e, ObdVehicleSilent) or (
+                                isinstance(e, ObdAdapterError) and e.kind in ("UNABLE TO CONNECT", "BUS INIT")):
+                            held.note_vehicle(False)
+                    raise
+                if held:
+                    held.adopt(readout)
                 case.append_obd(readout)                    # last step: a cancelled or failed read adds nothing
+                self.traffic.event("read stopped" if readout.stopped else "read finished")
                 return readout
             job = ObdJob(run, session_name=self.session_name, on_finish=self._obd_lock.release)
             self.obd_job = job
@@ -140,6 +189,49 @@ class Controller:
         job = self.obd_job
         job.join()
         return (job.readout, None) if job.state in ("done", "stopped") else (None, job.message)
+
+    def connect(self, source) -> str | None:
+        """Hold the adapter open. Returns a message if it could not."""
+        if not self._take_obd_lock():
+            return "A read is running; wait for it or cancel it first."
+        try:
+            if self.connection.state == "connected":
+                return "Already connected."
+            try:
+                transport = self._obd_transport(source)
+            except ObdError as e:
+                return str(e)
+            wrong = self._wrong_kind(transport)
+            if wrong:
+                return wrong
+            return self.connection.connect(transport, kind="simulated" if transport.sim else "real",
+                                           source=source)
+        finally:
+            self._obd_lock.release()
+
+    def disconnect(self) -> None:
+        if not self._take_obd_lock():
+            return
+        try:
+            self.connection.disconnect()
+        finally:
+            self._obd_lock.release()
+
+    def relink(self) -> str | None:
+        """Close the connection and open it again with the same source."""
+        source = self.connection.source
+        if not source:
+            return "Nothing to relink. Press Connect."
+        self.disconnect()
+        if self.connection.state not in ("disconnected",):
+            return "A read is running; wait for it or cancel it first."
+        return self.connect(source)
+
+    def connection_status(self) -> dict:
+        s = self.connection.status()
+        s["reading"] = bool(self.obd_job and self.obd_job.running)
+        s["traffic_error"] = self.traffic.last_error
+        return s
 
     def cancel(self) -> None:
         if self.job:
@@ -180,7 +272,9 @@ def get_controller() -> Controller:
     with _guard:
         if _controller is None:
             _controller = Controller(SessionStore(os.environ.get("CRANK_SESSIONS_DIR", "sessions")),
-                                     float(os.environ.get("CRANK_POLL_S", "0.2")))
+                                     float(os.environ.get("CRANK_POLL_S", "0.2")),
+                                     float(os.environ.get("CRANK_HEARTBEAT_S", "5")),
+                                     os.environ.get("CRANK_LOGS_DIR") or None)
         return _controller
 
 
