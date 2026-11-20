@@ -89,8 +89,11 @@ class SerialTransport(Transport):
             try:
                 try:
                     end = self._read_stream(norm, on_line, stop, max_seconds, silence_s)
-                except ObdCancelled:
-                    self._stop_monitor()                  # never leave the adapter monitoring
+                except BaseException:                     # cancel, a bad on_line, Ctrl-C: never leave the adapter monitoring
+                    try:
+                        self._stop_monitor()
+                    except OSError:
+                        pass                              # a dropped link: let the original exception surface
                     raise
                 if end.reason in ours:
                     self._stop_monitor()

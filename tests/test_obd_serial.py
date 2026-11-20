@@ -338,3 +338,26 @@ def test_held_transport_passes_stream_through():
     got = []
     end = HeldTransport(t).stream("ATMA", lambda ts, line: got.append(line), threading.Event(), max_seconds=0.1)
     assert got == ["0C9 8 00"] and end.reason in ("time", "silent")
+
+
+def test_a_raising_on_line_still_stops_the_monitor():
+    f, t = _mon([b"0C9 8 00\r"])
+
+    def boom(ts, line):
+        raise RuntimeError("decoder bug")
+    with pytest.raises(RuntimeError):
+        t.stream("ATMA", boom, threading.Event(), max_seconds=1)
+    assert b" " in f.written and b"\r" not in f.written
+
+
+def test_link_drop_with_a_failing_stop_write_still_raises_no_adapter():
+    f, t = _mon([b"0C9 8 00\r", OSError("gone")])
+    real = f.write
+
+    def write(data):
+        if data == b" ":
+            raise OSError("gone")
+        real(data)
+    f.write = write
+    with pytest.raises(ObdNoAdapter):
+        t.stream("ATMA", lambda ts, line: None, threading.Event(), max_seconds=1)
