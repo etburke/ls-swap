@@ -58,6 +58,7 @@ def build_server(ctrl) -> MCPServer:
 
 def _free(port: int) -> bool:
     with socket.socket() as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)      # as uvicorn binds: TIME_WAIT is not "busy"
         try:
             s.bind((HOST, port))
         except OSError:
@@ -82,7 +83,16 @@ def ensure_mcp_server(ctrl, port: int | None = None) -> McpStatus:
     with _lock:
         if ctrl.mcp is not None:
             return ctrl.mcp.status
-        port = _pick(int(os.environ.get("CRANK_MCP_PORT", DEFAULT_PORT)) if port is None else port)
+        raw = os.environ.get("CRANK_MCP_PORT", str(DEFAULT_PORT)) if port is None else port
+        try:
+            port = int(raw)
+            if not 0 <= port <= 65535:
+                raise ValueError(raw)
+            port = _pick(port)
+        except (ValueError, OSError):
+            ctrl.mcp = McpHandle(McpStatus("error", "", f"CRANK_MCP_PORT must be a port number from 0 to 65535 "
+                                                        f"(got {raw!r})."))
+            return ctrl.mcp.status
         url = f"http://{HOST}:{port}/mcp"
         if not _free(port):
             ctrl.mcp = McpHandle(McpStatus("port_busy", url, f"Port {port} is in use. Set CRANK_MCP_PORT to "

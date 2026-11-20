@@ -134,3 +134,21 @@ def test_reset_controller_stops_the_server(tmp_path, monkeypatch):
     reset_controller()
     with socket.socket() as s:
         assert s.connect_ex(("127.0.0.1", port)) != 0
+
+
+@pytest.mark.parametrize("bad", ["abc", "", "70000", "-1"])
+def test_a_bad_port_setting_is_a_status_not_a_crash(ctrl, monkeypatch, bad):
+    monkeypatch.setenv("CRANK_MCP_PORT", bad)
+    status = ensure_mcp_server(ctrl)
+    assert status.state == "error" and "CRANK_MCP_PORT" in status.message
+    assert ctrl.mcp.server is None
+
+
+def test_restarting_on_the_same_port_right_after_use_is_not_reported_busy(ctrl):
+    port = free_port()
+    ensure_mcp_server(ctrl, port)
+    with socket.create_connection(("127.0.0.1", port)) as conn:        # still open when the server stops, so the
+        conn.sendall(b"GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")  # server closes first and the port
+        conn.recv(4096)                                                 # sits in TIME_WAIT
+        stop_mcp_server(ctrl)
+    assert ensure_mcp_server(ctrl, port).state == "running"
