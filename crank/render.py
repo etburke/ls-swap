@@ -19,6 +19,17 @@ def _md(x) -> str:
     return " ".join(str(x).split()).replace("$", "\\$")
 
 
+AI_NOTE = "Entries marked [AI] were added by an AI assistant through the MCP server, not by the owner."
+
+
+def _ai(row: dict) -> str:
+    return "[AI] " if row.get("source") else ""
+
+
+def _has_ai(s: Summary) -> bool:
+    return any(r.get("source") for r in s.timeline + s.ruled_out + s.open + s.confirmed)
+
+
 def _cap_head(c: dict) -> str:
     sim = " (SIMULATED)" if c["sim"] else ""
     return f"{c['id']} {c['label'] or 'unlabeled'}{sim}"
@@ -80,11 +91,11 @@ def to_markdown(s: Summary) -> str:
     if s.symptoms:
         out += ["", "## Symptoms"] + [f"- {_md(x['text'])}" for x in s.symptoms]
     out += ["", "## Ruled out"]
-    out += ([f"- {_md(r['title'])}: {_md(r['reason'])}" + (f" (evidence: {', '.join(r['evidence'])})" if r["evidence"] else "")
+    out += ([f"- {_ai(r)}{_md(r['title'])}: {_md(r['reason'])}" + (f" (evidence: {', '.join(r['evidence'])})" if r["evidence"] else "")
              for r in s.ruled_out] or ["- nothing yet"])
-    out += ["", "## Still open"] + ([f"- {_md(r['title'])}" for r in s.open] or ["- nothing listed"])
+    out += ["", "## Still open"] + ([f"- {_ai(r)}{_md(r['title'])}" for r in s.open] or ["- nothing listed"])
     if s.confirmed:
-        out += ["", "## Confirmed"] + [f"- {_md(r['title'])}: {_md(r['reason'])}" for r in s.confirmed]
+        out += ["", "## Confirmed"] + [f"- {_ai(r)}{_md(r['title'])}: {_md(r['reason'])}" for r in s.confirmed]
     out += ["", "## Key data"]
     if s.codes:
         out.append("- Codes: " + _md(", ".join(_code(c) for c in s.codes)))
@@ -105,12 +116,14 @@ def to_markdown(s: Summary) -> str:
         for b in s.before_after:
             out += [f"- After \"{_md(b['change'])}\"{' ' + INFERRED if b['inferred'] else ''}:", f"  - before: {_md(_cap_line(b['before']))}", f"  - after: {_md(_cap_line(b['after']))}"]
     out += ["", "## Not yet tried"] + ([f"- {t}" for t in s.not_tried] or ["- all guided tests have data"])
-    out += ["", "## Timeline"] + ([f"- {t['ts'][:16].replace('T', ' ') or 'undated'}: {_md(t['line'])}"
+    out += ["", "## Timeline"] + ([f"- {t['ts'][:16].replace('T', ' ') or 'undated'}: {_ai(t)}{_md(t['line'])}"
                                   for t in s.timeline] or ["- nothing recorded yet"])
     if s.attachments:
         out += ["", "## Attachments (in the case folder)"] + [f"- {a}" for a in s.attachments]
     if s.skipped_lines:
         out += ["", f"Note: {s.skipped_lines} damaged log line(s) were skipped."]
+    if _has_ai(s):
+        out += ["", f"_{AI_NOTE}_"]
     out += ["", "_The verdicts are measurements and rule-based findings from a diagnostic tool, not a diagnosis._"]
     return "\n".join(out) + "\n"
 
@@ -175,12 +188,12 @@ def to_html(s: Summary, plots: dict | None = None) -> str:
         body.append(f"<h2>Problem</h2><p>{e(v.problem or NOT_RECORDED)}</p>")
         if s.symptoms:
             body.append("<h2>Symptoms</h2>" + _li(e(x["text"]) for x in s.symptoms))
-        body.append("<h2>Ruled out</h2>" + (_li(f"<b>{e(r['title'])}</b>: {e(r['reason'])}"
+        body.append("<h2>Ruled out</h2>" + (_li(f"{_ai(r)}<b>{e(r['title'])}</b>: {e(r['reason'])}"
                     + (f" <span class='muted'>(evidence: {e(', '.join(r['evidence']))})</span>" if r["evidence"] else "")
                     for r in s.ruled_out) or "<p class='muted'>nothing yet</p>"))
-        body.append("<h2>Still open</h2>" + (_li(e(r["title"]) for r in s.open) or "<p class='muted'>nothing listed</p>"))
+        body.append("<h2>Still open</h2>" + (_li(f"{_ai(r)}{e(r['title'])}" for r in s.open) or "<p class='muted'>nothing listed</p>"))
         if s.confirmed:
-            body.append("<h2>Confirmed</h2>" + _li(f"{e(r['title'])}: {e(r['reason'])}" for r in s.confirmed))
+            body.append("<h2>Confirmed</h2>" + _li(f"{_ai(r)}{e(r['title'])}: {e(r['reason'])}" for r in s.confirmed))
         data = []
         if s.codes:
             data.append("Codes: " + e(", ".join(_code(c) for c in s.codes)))
@@ -203,7 +216,9 @@ def to_html(s: Summary, plots: dict | None = None) -> str:
                         f"{_cap_html(b['after'], plots.get(b['after']['id'], ''))}</div>")
         body.append("<h2>Not yet tried</h2>" + (_li(e(t) for t in s.not_tried) or "<p class='muted'>all guided tests have data</p>"))
         body.append("<h2>Timeline</h2>" + (_li([f"<span class='muted'>{e(t['ts'][:16].replace('T', ' ') or 'undated')}</span> "
-                    f"{e(t['line'])}" for t in s.timeline]) or "<p class='muted'>nothing recorded yet</p>"))
+                    f"{_ai(t)}{e(t['line'])}" for t in s.timeline]) or "<p class='muted'>nothing recorded yet</p>"))
+        if _has_ai(s):
+            body.append(f"<p class='muted'>{e(AI_NOTE)}</p>")
         if s.skipped_lines:
             body.append(f"<p class='muted'>{s.skipped_lines} damaged log line(s) were skipped.</p>")
     body.append("<p class='muted'>The verdicts are measurements and rule-based findings from a diagnostic tool, not a diagnosis.</p>")
