@@ -624,3 +624,42 @@ def test_sidebar_has_no_qr_code_without_a_network_address(at, monkeypatch):
     at.run()
     assert not at.exception
     assert not any("QR code" in e.label for e in at.sidebar.expander)
+
+
+def test_ai_access_block_shows_the_endpoint_and_starts_with_control_off(at):
+    assert at.sidebar.toggle(key="ai_control").value is False
+    assert get_controller().ai_control is False
+    codes = [c.value for c in at.sidebar.code]
+    assert any(c.startswith("claude mcp add --transport http ls-swap http://127.0.0.1:") and c.endswith("/mcp")
+               for c in codes)
+
+
+def test_the_toggle_switches_ai_control_on_and_off(at):
+    at.sidebar.toggle(key="ai_control").set_value(True).run()
+    assert get_controller().ai_control is True
+    at.sidebar.toggle(key="ai_control").set_value(False).run()
+    assert get_controller().ai_control is False
+
+
+def test_another_tab_rerunning_does_not_flip_the_toggle_back(at):
+    at.sidebar.toggle(key="ai_control").set_value(True).run()
+    assert get_controller().ai_control is True
+    get_controller().ai_control = False                   # turned off elsewhere (another tab)
+    at.run()                                              # this tab reruns without the user touching the toggle
+    assert get_controller().ai_control is False
+
+
+def test_a_busy_mcp_port_is_shown_not_fatal(tmp_path, monkeypatch):
+    import socket
+    monkeypatch.setenv("CRANK_SESSIONS_DIR", str(tmp_path))
+    monkeypatch.setenv("CRANK_POLL_S", "0")
+    with socket.socket() as blocker:
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen()
+        monkeypatch.setenv("CRANK_MCP_PORT", str(blocker.getsockname()[1]))
+        reset_controller()
+        app = AppTest.from_file(APP, default_timeout=60)
+        app.run()
+        assert not app.exception
+        assert any("MCP server is not running" in w.value for w in app.sidebar.warning)
+    reset_controller()
