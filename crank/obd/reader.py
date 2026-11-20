@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 from . import protocol as P
 from .adapter import AdapterInfo, clean_id, parse_sti
-from .errors import ObdAdapterError, ObdBusy, ObdCancelled, ObdProtocolError, ObdStopped, ObdTimeout
+from .errors import ObdAdapterError, ObdBusy, ObdCancelled, ObdProtocolError, ObdStopped, ObdTimeout, ObdVehicleSilent
 from .pids import FREEZE_PIDS, LIVE_PIDS, PIDS
 from .reasons import REASON_TEXT, describe_unavailable
 from .transport import Transport
@@ -121,9 +121,10 @@ class _Interrupt:
 
 class ObdReader:
     def __init__(self, transport: Transport, timeout: float = 5.0, first_timeout: float = 20.0,
-                 retry_pause: float = 0.3, cancel=None, stop=None):
+                 retry_pause: float = 0.3, cancel=None, stop=None, adapter=None):
         self.t, self.timeout, self.first_timeout, self.retry_pause = transport, timeout, first_timeout, retry_pause
         self.cancel, self.stop = cancel, stop
+        self.adapter = adapter                       # an AdapterInfo a standing connection already identified
         self.has_data, self._section = False, ""
         self._interrupt = _Interrupt(self)
         self.raw: dict = {}
@@ -225,6 +226,18 @@ class ObdReader:
         """True when the support map covering this PID could not be read."""
         return self.unknown_from is not None and (pid - 1) // 0x20 * 0x20 >= self.unknown_from
 
+    def prepare(self) -> AdapterInfo:
+        """Setup commands and adapter identification on an open transport (what a connection does once)."""
+        for cmd in INIT:
+            self._ask(cmd)
+        return self._identify()
+
+    def _release(self) -> None:
+        """Take our interrupt off the transport: a held connection outlives this read, and its heartbeat must
+        not see a cancel left over from it."""
+        if self.cancel is not None or self.stop is not None:
+            self.t.cancel = None
+
     def read(self) -> ObdReadout:
         self.raw = {}
         out = ObdReadout(sim=self.t.sim, read_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
@@ -236,14 +249,15 @@ class ObdReader:
             self.t.cancel = self._interrupt
         self.t.open()
         try:
-            for cmd in INIT:
-                self._ask(cmd)
-            out.adapter = self._identify()
-            out.notes.extend(out.adapter.notes)
+            if self.adapter is None:
+                out.adapter = self.prepare()
+                out.notes.extend(out.adapter.notes)
+            else:
+                out.adapter = self.adapter                 # a standing connection did this already
             first_raw, msgs = self._request(P.request(0x01, 0x00), P.ecu_messages,
                                             self.first_timeout)     # triggers protocol search
             if msgs is None:
-                raise ObdProtocolError("The vehicle did not answer. Is the key on?")
+                raise ObdVehicleSilent("The vehicle did not answer. Is the key on?")
             self.has_data, self._section = True, "maps"
             out.protocol = clean_id(self._ask("ATDPN"), "ATDPN")
             if not out.protocol:
@@ -277,11 +291,13 @@ class ObdReader:
         except ObdStopped:
             self._finish_stopped(out)
         except BaseException:
+            self._release()
             try:
                 self.t.close()
             except Exception:                              # never mask the error that got us here
                 pass
             raise
+        self._release()
         self.t.close()
         out.raw = self.raw
         return out

@@ -3,10 +3,12 @@ import time
 
 import pytest
 
-from crank.obd.errors import ObdAdapterError, ObdCancelled, ObdNoAdapter, ObdProtocolError, ObdTimeout
+from crank.obd.adapter import AdapterInfo
+from crank.obd.errors import (ObdAdapterError, ObdCancelled, ObdNoAdapter, ObdProtocolError, ObdTimeout,
+                              ObdVehicleSilent)
 from crank.obd.pids import LIVE_PIDS
-from crank.obd.reader import ObdReader
-from crank.obd.transport import LIVE_RUNNING, SCENARIOS, SimTransport
+from crank.obd.reader import INIT, ObdReader
+from crank.obd.transport import LIVE_RUNNING, SCENARIOS, HeldTransport, SimTransport
 
 
 def read(name, **kw):
@@ -674,3 +676,69 @@ def test_event_data_carries_stopped_and_not_read():
     assert d["stopped"] is True and d["not_read"] == ["07", "0A", "02"]
     full = read("healthy").to_event_data()
     assert full["stopped"] is False and full["not_read"] == []
+
+
+def test_a_silent_vehicle_raises_the_specific_error_with_the_same_message():
+    t = SimTransport("healthy")
+    inner = t.send
+    t.send = lambda cmd, timeout=5.0: "NO DATA" if cmd == "0100" else inner(cmd, timeout)
+    with pytest.raises(ObdVehicleSilent) as e:
+        ObdReader(t, retry_pause=0).read()
+    assert isinstance(e.value, ObdProtocolError) and "Is the key on?" in str(e.value)
+
+
+def test_the_reader_takes_its_interrupt_off_the_transport_when_it_is_done():
+    ev = threading.Event()
+    done = SimTransport("healthy")
+    ObdReader(done, cancel=ev, retry_pause=0).read()
+    assert done.cancel is None
+    cut = sent_by(SimTransport("healthy"))
+    inner = cut.send
+
+    def send(cmd, timeout=5.0):
+        if cmd == "010C":
+            ev.set()
+        return inner(cmd, timeout)
+    cut.send = send
+    with pytest.raises(ObdCancelled):
+        ObdReader(cut, cancel=ev, retry_pause=0).read()
+    assert cut.cancel is None                              # else the next heartbeat would see a stale cancel
+
+
+def test_prepare_runs_the_setup_and_identifies_the_adapter():
+    t = sent_by(SimTransport("healthy")); t.open()
+    info = ObdReader(t, retry_pause=0).prepare()
+    assert t.sent[:len(INIT)] == list(INIT) and "STN2255" in info.stn_version and info.supports_st
+
+
+def test_held_transport_never_opens_or_closes_the_inner_one():
+    inner = SimTransport("healthy"); calls = []
+    inner.open, inner.close = lambda: calls.append("open"), lambda: calls.append("close")
+    h = HeldTransport(inner)
+    h.open(); h.close()
+    assert calls == [] and h.sim is True
+
+
+def test_a_warm_read_skips_the_setup_and_the_identification_and_keeps_the_port_open():
+    inner = sent_by(SimTransport("healthy")); inner.open()
+    closed = []
+    inner.close = lambda: closed.append(1)
+    info = ObdReader(inner, retry_pause=0).prepare()          # what the connection did when it connected
+    inner.sent.clear()
+    r = ObdReader(HeldTransport(inner), adapter=info, retry_pause=0).read()
+    assert inner.sent[0] == "0100" and "ATZ" not in inner.sent and "ATI" not in inner.sent
+    assert r.adapter is info and r.live and not closed
+
+
+def test_a_warm_read_does_not_repeat_the_adapter_notes():
+    inner = SimTransport("flaky_adapter_id"); inner.open()
+    info = ObdReader(inner, retry_pause=0).prepare()
+    assert info.notes                                         # STSN timed out at connect
+    r = ObdReader(HeldTransport(inner), adapter=info, retry_pause=0).read()
+    assert not any("identification incomplete" in n for n in r.notes)
+
+
+def test_a_cold_read_on_a_held_transport_still_does_the_full_setup():
+    inner = sent_by(SimTransport("healthy")); inner.open()
+    r = ObdReader(HeldTransport(inner), retry_pause=0).read()
+    assert inner.sent[:len(INIT)] == list(INIT) and r.adapter.supports_st

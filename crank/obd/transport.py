@@ -59,6 +59,16 @@ class DelegatingTransport(Transport):
         self.inner.close()
 
 
+class HeldTransport(DelegatingTransport):
+    """A standing connection lent to one read: the reader may 'open' and 'close' it, the port stays up."""
+
+    def open(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
 def _enc_pid_bitmap(pids: set[int], base: int) -> bytes:
     out = bytearray(4)
     for p in pids:
@@ -345,4 +355,4 @@ class SimTransport(Transport):
         return "?"
 
 
-__all__ = ["Transport", "DelegatingTransport", "SimTransport", "SCENARIOS", "request"]
+__all__ = ["Transport", "DelegatingTransport", "HeldTransport", "SimTransport", "SCENARIOS", "request"]
