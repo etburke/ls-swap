@@ -85,13 +85,19 @@ with st.sidebar:
         names = ss.store.list_sessions()
     st.selectbox("Session", names, index=names.index(ss.session_name), key="session_pick")
     ss.session_name = ss.session_pick
-    new = st.text_input("New session name", key="new_session")
-    if st.button("Create session", key="create_session") and new.strip():
+    def create_session():
+        # a callback runs before the widgets are built, so the dropdown can be pointed at the new session
+        if not ss.get("new_session", "").strip():
+            return
         try:
-            ss.session_name = ss.store.open(new).name
-            st.rerun()
+            ss.session_pick = ss.store.open(ss.new_session).name
+            ss.pop("new_session_error", None)
         except ValueError as e:
-            st.error(str(e))
+            ss.new_session_error = str(e)
+    st.text_input("New session name", key="new_session")
+    st.button("Create session", key="create_session", on_click=create_session)
+    if ss.get("new_session_error"):
+        st.error(ss.new_session_error)
     st.divider()
     st.radio("Page", PAGES, key="page")
     st.divider()
