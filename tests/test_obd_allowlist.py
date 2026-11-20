@@ -32,7 +32,8 @@ def test_forbidden_is_an_obd_error():
     assert issubclass(ObdForbiddenCommand, ObdError)
 
 
-@pytest.mark.parametrize("name", [n for n, s in SCENARIOS.items() if not s.fault or s.fault.startswith("drop")])
+@pytest.mark.parametrize("name", [n for n, s in SCENARIOS.items()
+                                  if (not s.fault or s.fault.startswith("drop")) and not s.delay])
 def test_every_command_the_reader_sends_passes(name):
     sent = []
 

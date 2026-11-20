@@ -1,6 +1,9 @@
+import threading
+import time
+
 import pytest
 
-from crank.obd.errors import ObdAdapterError, ObdNoAdapter, ObdProtocolError, ObdTimeout
+from crank.obd.errors import ObdAdapterError, ObdCancelled, ObdNoAdapter, ObdProtocolError, ObdTimeout
 from crank.obd.pids import LIVE_PIDS
 from crank.obd.reader import ObdReader
 from crank.obd.transport import LIVE_RUNNING, SCENARIOS, SimTransport
@@ -526,3 +529,148 @@ def test_an_empty_atdpn_reply_is_a_clear_error():
 
     with pytest.raises(ObdProtocolError, match="did not report its protocol"):
         ObdReader(Silent("healthy"), retry_pause=0).read()
+
+
+def test_a_cancel_set_before_the_read_connects_to_nothing():
+    ev = threading.Event(); ev.set()
+    t = sent_by(SimTransport("healthy"))
+    with pytest.raises(ObdCancelled):
+        ObdReader(t, cancel=ev, retry_pause=0).read()
+    assert t.sent == [] and not t.opened
+
+
+def test_a_cancel_in_the_middle_stops_the_read_and_closes_the_transport():
+    ev, closed = threading.Event(), []
+    t = sent_by(SimTransport("healthy"))
+    inner = t.send
+
+    def send(cmd, timeout=5.0):
+        if cmd == "010C":
+            ev.set()
+        return inner(cmd, timeout)
+    t.send, t.close = send, lambda: closed.append(1)
+    with pytest.raises(ObdCancelled):
+        ObdReader(t, cancel=ev, retry_pause=0).read()
+    assert closed and "010C" in t.sent and "0142" not in t.sent      # 0142 is asked right after 010C
+
+
+def test_a_cancel_ends_the_pause_before_a_retry():
+    ev = threading.Event()
+    threading.Timer(0.1, ev.set).start()
+    start = time.monotonic()
+    with pytest.raises(ObdCancelled):
+        ObdReader(SimTransport("transient_can_error"), cancel=ev, retry_pause=30).read()
+    assert time.monotonic() - start < 5.0
+
+
+def test_a_reader_without_a_cancel_event_still_reads():
+    assert ObdReader(SimTransport("healthy"), retry_pause=0).read().live
+
+
+def stop_read(scenario, after, **kw):
+    """Read `scenario`, pressing Stop as soon as `after` has been answered."""
+    stop = threading.Event()
+    t = sent_by(SimTransport(scenario))
+    inner = t.send
+
+    def send(cmd, timeout=5.0):
+        r = inner(cmd, timeout)
+        if cmd == after:
+            stop.set()
+        return r
+    t.send = send
+    return ObdReader(t, stop=stop, retry_pause=0, **kw).read(), t
+
+
+def test_stop_before_the_pcm_answers_acts_as_a_cancel():
+    stop = threading.Event(); stop.set()
+    t = sent_by(SimTransport("healthy"))
+    with pytest.raises(ObdCancelled):
+        ObdReader(t, stop=stop, retry_pause=0).read()
+    assert t.sent == []
+
+
+def test_stop_during_the_adapter_identification_acts_as_a_cancel():
+    stop = threading.Event()
+    t = sent_by(SimTransport("healthy"))
+    inner = t.send
+
+    def send(cmd, timeout=5.0):
+        if cmd == "STI":
+            stop.set()
+        return inner(cmd, timeout)
+    t.send = send
+    with pytest.raises(ObdCancelled):
+        ObdReader(t, stop=stop, retry_pause=0).read()
+
+
+def test_cancel_wins_over_stop():
+    cancel, stop = threading.Event(), threading.Event()
+    cancel.set(); stop.set()
+    with pytest.raises(ObdCancelled):
+        ObdReader(SimTransport("healthy"), cancel=cancel, stop=stop, retry_pause=0).read()
+
+
+def test_stop_right_after_the_first_answer_keeps_nothing_but_says_so():
+    r, t = stop_read("many_codes", "0100")
+    assert r.stopped and r.codes == [] and r.mil_on is None and r.freeze_frame is None
+    assert r.not_read == ["03", "07", "0A", "02"]
+    assert len(r.live) == len(LIVE_PIDS) and all(v.reason == "stopped" and not v.supported for v in r.live)
+    assert "Stopped by you before the read finished." in r.notes
+    assert "03" not in t.sent
+
+
+def test_stop_after_mode_03_keeps_the_stored_codes_and_not_reads_the_rest():
+    r, t = stop_read("many_codes", "03")
+    assert r.stopped and {c["status"] for c in r.codes} == {"stored"} and len(r.codes) == 3
+    assert r.not_read == ["07", "0A", "02"] and "07" not in t.sent
+
+
+def test_stop_in_the_live_values_keeps_the_values_already_read():
+    r, t = stop_read("healthy", "010C")
+    assert r.stopped and r.not_read == [] and r.live[0].supported and r.live[0].name == "Engine RPM"
+    assert all(v.reason == "stopped" for v in r.live[1:]) and len(r.live) == len(LIVE_PIDS)
+    assert "0142" not in t.sent
+
+
+def test_stop_in_the_freeze_frame_drops_the_partial_frame():
+    r, _ = stop_read("p2119_zero_rpm", "020200")
+    assert r.stopped and r.freeze_frame is None and r.not_read == ["02"]
+    assert [c["code"] for c in r.codes] == ["P2119"]
+
+
+def test_a_stopped_read_closes_the_transport():
+    closed = []
+    stop = threading.Event()
+    t = sent_by(SimTransport("healthy"))
+    inner = t.send
+
+    def send(cmd, timeout=5.0):
+        r = inner(cmd, timeout)
+        if cmd == "0100":
+            stop.set()                                     # after the PCM answered: there is data to keep
+        return r
+    t.send, t.close = send, lambda: closed.append(1)
+    assert ObdReader(t, stop=stop, retry_pause=0).read().stopped and closed
+
+
+def test_a_stopped_read_says_what_was_not_read():
+    r, _ = stop_read("many_codes", "0100")
+    lines = r.lines()
+    assert lines[0].endswith(": not read")
+    assert any(l.startswith(f"Live values read: 0 of {len(LIVE_PIDS)}") and "not read, stopped by you" in l
+               for l in lines)
+    assert "Freeze frame not read" in lines and "Stopped by you before the read finished." in lines
+
+
+def test_a_partly_read_set_of_codes_names_the_modes_not_read():
+    r, _ = stop_read("many_codes", "03")
+    assert "(modes not read: 07, 0A)" in r.lines()[0] and "P0335 (stored" in r.lines()[0]
+
+
+def test_event_data_carries_stopped_and_not_read():
+    r, _ = stop_read("many_codes", "03")
+    d = r.to_event_data()
+    assert d["stopped"] is True and d["not_read"] == ["07", "0A", "02"]
+    full = read("healthy").to_event_data()
+    assert full["stopped"] is False and full["not_read"] == []

@@ -13,6 +13,17 @@ class ObdTimeout(ObdError):
     pass
 
 
+class ObdCancelled(ObdError):
+    """The person cancelled the read. Nothing is recorded."""
+
+    def __init__(self, message: str = "Read cancelled; nothing was recorded."):
+        super().__init__(message)
+
+
+class ObdStopped(ObdError):
+    """The person pressed Stop and the read has data worth keeping. Raised and caught inside the reader."""
+
+
 class ObdProtocolError(ObdError):
     pass
 

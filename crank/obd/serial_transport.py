@@ -7,7 +7,7 @@ import threading
 import time
 
 from . import allowlist
-from .errors import ObdNoAdapter, ObdTimeout
+from .errors import ObdCancelled, ObdNoAdapter, ObdTimeout
 from .transport import Transport
 
 BAUD_FALLBACK = 38400
@@ -49,6 +49,9 @@ class SerialTransport(Transport):
                 self._atz()
                 self.baud = baud
                 return
+            except ObdCancelled:
+                self.close()
+                raise
             except ObdTimeout:
                 self.close()
                 if i == len(bauds) - 1:
@@ -58,12 +61,14 @@ class SerialTransport(Transport):
         norm = allowlist.check(cmd)                   # refuse before anything is written
         if self._ser is None:
             raise ObdNoAdapter("The adapter is not open.")
+        self.check_cancel()
         with self._lock:
             try:
                 self._ser.reset_input_buffer()
                 self._ser.write(norm.encode() + b"\r")
                 buf, deadline = b"", time.monotonic() + timeout
                 while b">" not in buf:
+                    self.check_cancel()
                     if time.monotonic() > deadline:
                         raise ObdTimeout("The adapter did not answer. Check it is plugged in and powered.")
                     buf += self._ser.read(max(1, self._ser.in_waiting or 0))

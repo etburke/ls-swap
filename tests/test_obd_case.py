@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 
 from crank.case import Case
@@ -337,3 +339,68 @@ def test_a_code_changing_status_shows_a_demoted_row_and_the_new_one(case):
     _codes_read(case, [("P0335", "pending")])
     status = sorted(c["status"] for c in build_summary(case).codes)
     assert status == ["not in latest OBD read", "pending"]
+
+
+def stopped_read(scenario, after):
+    stop = threading.Event()
+    t = SimTransport(scenario)
+    inner = t.send
+
+    def send(cmd, timeout=5.0):
+        r = inner(cmd, timeout)
+        if cmd == after:
+            stop.set()
+        return r
+    t.send = send
+    return ObdReader(t, stop=stop, retry_pause=0).read()
+
+
+def test_a_stopped_read_is_recorded_with_what_was_not_read(case):
+    events = case.append_obd(stopped_read("many_codes", "0100"))
+    d = events[0].data
+    assert d["stopped"] is True and d["not_read"] == ["03", "07", "0A", "02"]
+    assert not [e for e in events if e.type == "measurement"]
+
+
+def test_a_stopped_read_does_not_say_there_were_no_codes(case):
+    case.append_obd(stopped_read("many_codes", "0100"))
+    line = [t["line"] for t in build_summary(case).timeline if t["type"] == "code_read"][-1]
+    assert "codes not read" in line and "stopped by you before it finished" in line
+    assert "no stored, pending or permanent codes" not in line
+
+
+def test_a_partly_read_set_of_codes_lists_the_modes_not_read(case):
+    case.append_obd(stopped_read("many_codes", "03"))
+    s = build_summary(case)
+    line = [t["line"] for t in s.timeline if t["type"] == "code_read"][-1]
+    assert "P0335 (stored)" in line and "modes not read: 07, 0A, 02" in line
+    assert any(c["code"] == "P0335" and c["status"] == "stored" for c in s.codes)
+
+
+def test_earlier_codes_and_freeze_frame_survive_a_read_stopped_before_them(case):
+    case.append_obd(read("many_codes"))
+    case.append_obd(stopped_read("healthy", "0100"))
+    s = build_summary(case)
+    assert any(c["code"] == "P0335" and c["status"] == "stored" for c in s.codes)
+    assert not any(c["status"] == "not in latest OBD read" for c in s.codes)
+    assert s.freeze_frame and s.freeze_frame["code"] == "P0335"
+
+
+def test_values_not_reached_are_listed_as_not_read_in_both_reports(case):
+    case.append_obd(stopped_read("healthy", "010C"))
+    s = build_summary(case)
+    assert s.obd_unavailable and all(u["reason"] == "stopped" for u in s.obd_unavailable)
+    for out in (to_markdown(s), to_html(s)):
+        assert "not read, stopped by you" in out and "Stopped by you before the read finished." in out
+
+
+def test_a_read_that_was_not_stopped_looks_as_before(case):
+    case.append_obd(read("healthy"))
+    line = [t["line"] for t in build_summary(case).timeline if t["type"] == "code_read"][-1]
+    assert "stopped" not in line and "modes not read" not in line
+
+
+def test_old_events_without_stopped_or_not_read_still_render(case):
+    case.append("code_read", "", {"codes": [], "source": "obd", "sim": True})
+    s = build_summary(case)
+    assert [t for t in s.timeline if t["type"] == "code_read"] and to_markdown(s) and to_html(s)

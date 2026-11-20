@@ -102,9 +102,9 @@ temperature, fuel trims and a few more). Each read is added to the case: one `co
 every value the PCM answered. A value the PCM does not support is listed as not supported, never as zero, and a
 real 0 RPM is kept as 0. The tool never clears codes.
 
-The simulator has twenty-nine scenarios (healthy, a stored P2119 with 0 RPM, many codes, a PCM with limited support, four
+The simulator has thirty scenarios (healthy, a stored P2119 with 0 RPM, many codes, a PCM with limited support, four
 failure modes, and five multi-ECU ones: `pcm_and_trans`, `interleaved_multiframe`, `same_code_two_ecus`, `pcm_not_7e8`,
-`trans_rejects_mode`, and five for adapter trouble, below). **Real adapter** reads classic-Bluetooth ELM327/STN adapters (for example the OBDLink MX+) through
+`trans_rejects_mode`, `slow_adapter` (every reply takes about a second, so you can try Stop and Cancel without hardware), and five for adapter trouble, below). **Real adapter** reads classic-Bluetooth ELM327/STN adapters (for example the OBDLink MX+) through
 a serial port: pair the adapter in macOS Bluetooth settings first, then pick its port (or Auto-detect). Only
 read-only requests are ever sent: modes 01, 02, 03, 07 and 0A plus a fixed set of adapter setup commands. Anything
 that could write adapter memory or put it to sleep (`ATPP`, `STSAVCAL`, `STSLEEP`, ...) is refused before it reaches
@@ -131,6 +131,8 @@ still refused. Nothing changes behaviour based on what was found yet; later work
 simulator's `elm_clone` and `flaky_adapter_id` scenarios exercise it. Not yet checked against a real adapter (#3).
 
 **When the PCM does not give a value.** A PID the PCM refuses, answers "busy" to, or does not answer never fails the read: the value is left out and the reason is recorded (not in the PCM's support map, refused by the PCM, PCM busy, no answer). A busy reply is retried once, under the same limit as adapter errors. The result lines group the missing values by reason, and the case summary and report print the latest read's notes (retries, resets, adapter gaps) and any values the PCM would not give. If a PID support map cannot be read, the PIDs it covers are tried anyway. Only a failure on the very first supported-PID request, or a busy reply on a trouble-code request, still fails the read. Trouble codes now show separate rows when a code is both stored and permanent. A case holds real OBD reads or simulated ones, never both: reading from the other kind is refused with a message, so practice runs cannot be mistaken for evidence. The simulator's `pid_refused`, `pid_busy_once`, `pid_busy_always`, `pid_no_answer`, `status_refused`, `map_refused`, `pcm_refuses_0100`, `trans_busy_on_pid` and `many_pids_busy` scenarios exercise these. None of this is checked against a real PCM yet (#3).
+
+**Stopping or cancelling a read.** A read runs in the background. While it runs, the Case page and the phone's Read OBD show "Reading from the vehicle… N s" with **Stop (keep what was read)** and **Cancel**, and the Read button is disabled; a second read from another device or tab is refused until it ends. **Cancel** stops the read within a fraction of a second, even during the protocol search, closes the adapter's port and records nothing: no event and no measurements, and the page says so. **Stop** ends the read at the next command and records what was read, marked as stopped: trouble-code modes and the freeze frame it did not reach are shown as "not read" (never as "none"), live values it did not reach are listed as "not read, stopped by you", and codes from an earlier read are not marked as gone. A Stop pressed before the vehicle has answered anything has nothing to keep and acts as Cancel. The simulator's `slow_adapter` scenario lets you try both without hardware. Not checked against a real adapter yet (#3).
 
 ## First session at the truck
 

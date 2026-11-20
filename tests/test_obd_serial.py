@@ -1,6 +1,9 @@
+import threading
+import time
+
 import pytest
 
-from crank.obd.errors import ObdForbiddenCommand, ObdNoAdapter, ObdTimeout
+from crank.obd.errors import ObdCancelled, ObdForbiddenCommand, ObdNoAdapter, ObdTimeout
 from crank.obd.reader import ObdReader
 from crank.obd.serial_transport import SerialTransport
 from crank.obd.transport import SimTransport
@@ -184,3 +187,39 @@ def test_both_atz_attempts_silent_at_both_bauds_still_raises():
     with pytest.raises(ObdTimeout):
         SerialTransport("/dev/cu.fake", serial_factory=factory, atz_timeout=0.1).open()
     assert seen == ["ATZ"] * 4
+
+
+def test_cancel_interrupts_the_wait_for_a_reply():
+    f = FakeSerial({"0100": [b"SEARCHING..."]})            # no prompt ever arrives
+    t = make(f); t.open()
+    t.cancel = threading.Event()
+    threading.Timer(0.05, t.cancel.set).start()
+    start = time.monotonic()
+    with pytest.raises(ObdCancelled):
+        t.send("0100", 20.0)
+    assert time.monotonic() - start < 1.0
+
+
+def test_a_set_cancel_stops_before_anything_is_written():
+    f = FakeSerial()
+    t = make(f); t.open()
+    written = len(f.written)
+    t.cancel = threading.Event(); t.cancel.set()
+    with pytest.raises(ObdCancelled):
+        t.send("0100", 1.0)
+    assert len(f.written) == written
+
+
+def test_cancel_during_open_closes_the_port():
+    f = FakeSerial()
+    t = make(f)
+    t.cancel = threading.Event(); t.cancel.set()
+    with pytest.raises(ObdCancelled):
+        t.open()
+    assert f.closed
+
+
+def test_a_transport_without_a_cancel_event_sends_as_before():
+    f = FakeSerial({"010C": [b"41 0C 0B B8\r\r>"]})
+    t = make(f); t.open()
+    assert t.cancel is None and t.send("010C", 1.0).strip() == "41 0C 0B B8"

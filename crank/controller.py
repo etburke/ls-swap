@@ -9,6 +9,7 @@ from .capture import CaptureJob
 from .case import Case
 from .model import CaptureSettings, Thresholds
 from .obd.errors import ObdError
+from .obd.job import ObdJob
 from .obd.reader import ObdReader
 from .obd.serial_transport import SerialTransport, resolve_port
 from .obd.transport import SimTransport
@@ -32,6 +33,7 @@ class Controller:
         self.job: CaptureJob | None = None
         self._lock = threading.Lock()
         self._obd_lock = threading.Lock()
+        self.obd_job: ObdJob | None = None
 
     def sync(self, **fields) -> None:
         """The laptop UI pushes its current choices here on every run."""
@@ -86,25 +88,58 @@ class Controller:
         use = "the simulator" if have == "real" else "a real adapter"
         return f"This case already has {have} OBD reads. Start a new case to use {use}."
 
-    def read_obd(self, source="healthy"):
-        """One OBD read into the current case. Returns (readout, None) or (None, message).
+    def start_obd(self, source="healthy") -> str | None:
+        """Start one OBD read into the current case in the background. Returns a message if it could not
+        start, else None. `source` is a simulator scenario name, or ("serial", port | "auto") for a real adapter.
 
-        `source` is a simulator scenario name, or ("serial", port | "auto") for a real adapter."""
+        The lock is held until the job ends, so a second read from the phone or another tab is refused."""
         if not self._obd_lock.acquire(blocking=False):
-            return None, "An OBD read is already running."
+            return "An OBD read is already running."
+        started = False
         try:
             try:
                 transport = self._obd_transport(source)
-                wrong = self._wrong_kind(transport)
-                if wrong:
-                    return None, wrong
-                readout = ObdReader(transport).read()
             except ObdError as e:
-                return None, str(e)
-            self.case().append_obd(readout)
-            return readout, None
+                return str(e)
+            wrong = self._wrong_kind(transport)
+            if wrong:
+                return wrong
+            case = self.case()                              # the read goes to the case it was started on
+
+            def run(cancel, stop):
+                readout = ObdReader(transport, cancel=cancel, stop=stop).read()
+                case.append_obd(readout)                    # last step: a cancelled or failed read adds nothing
+                return readout
+            job = ObdJob(run, session_name=self.session_name, on_finish=self._obd_lock.release)
+            self.obd_job = job
+            job.start()
+            started = True
+            return None
         finally:
-            self._obd_lock.release()
+            if not started:
+                self._obd_lock.release()
+
+    def cancel_obd(self) -> None:
+        """Throw the running read away; nothing is recorded."""
+        job = self.obd_job
+        if job and job.running:
+            job.cancel()
+
+    def stop_obd(self) -> None:
+        """End the running read and keep what was read (acts as a cancel before the PCM has answered)."""
+        job = self.obd_job
+        if job and job.running:
+            job.stop()
+
+    def read_obd(self, source="healthy"):
+        """One OBD read into the current case, waiting for it to finish.
+        Returns (readout, None) or (None, message)."""
+        err = self.start_obd(source)
+        if err:
+            return None, err
+        job = self.obd_job
+        job.join()
+        return (job.readout, None) if job.state in ("done", "stopped") else (None, job.message)
 
     def cancel(self) -> None:
         if self.job:

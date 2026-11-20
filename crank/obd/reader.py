@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 from . import protocol as P
 from .adapter import AdapterInfo, clean_id, parse_sti
-from .errors import ObdAdapterError, ObdBusy, ObdProtocolError, ObdTimeout
+from .errors import ObdAdapterError, ObdBusy, ObdCancelled, ObdProtocolError, ObdStopped, ObdTimeout
 from .pids import FREEZE_PIDS, LIVE_PIDS, PIDS
 from .reasons import REASON_TEXT, describe_unavailable
 from .transport import Transport
@@ -14,6 +14,8 @@ from .transport import Transport
 INIT = ("ATZ", "ATE0", "ATL0", "ATS0", "ATH1", "ATSP0")
 STATUS_MODES = (("stored", 0x03), ("pending", 0x07), ("permanent", 0x0A))
 MAX_RETRIES = 3
+CODE_MODES = ("03", "07", "0A")
+UNREAD_ORDER = ("03", "07", "0A", "02")
 
 
 @dataclass
@@ -22,7 +24,7 @@ class LiveValue:
     name: str
     unit: str
     value: float | None          # None = no value (see `reason`)
-    reason: str = ""             # "" = read; else not_in_map | refused | busy | no_answer
+    reason: str = ""             # "" = read; else not_in_map | refused | busy | no_answer | stopped
 
     @property
     def supported(self) -> bool:
@@ -44,6 +46,8 @@ class ObdReadout:
     adapter: AdapterInfo = field(default_factory=AdapterInfo)
     sim: bool = False
     read_at: str = ""
+    stopped: bool = False                                # the person pressed Stop; see not_read
+    not_read: list = field(default_factory=list)         # code modes and "02" the read never completed
 
     @property
     def dtc_count(self) -> int:
@@ -55,9 +59,15 @@ class ObdReadout:
         multi = len(self.ecus) > 1
         codes = ", ".join(f"{c['code']} ({c['status']}" + (f", {c['ecu']}" if multi and c.get("ecu") else "") + ")"
                           for c in self.codes)
+        unread = [m for m in self.not_read if m in CODE_MODES]
         if not codes:
-            codes = ("no codes reported by the modes that were read" if self.unsupported_modes
-                     else "none stored, pending or permanent")
+            if len(unread) == len(CODE_MODES):
+                codes = "not read"
+            else:
+                codes = ("no codes reported by the modes that were read" if (self.unsupported_modes or unread)
+                         else "none stored, pending or permanent")
+        if unread and len(unread) < len(CODE_MODES):
+            codes += f" (modes not read: {', '.join(unread)})"
         out = [f"Codes{sim}: " + codes, f"Adapter{sim}: {self.adapter.label()}"]
         if multi:
             out.append("ECUs that answered: " + ", ".join(self.ecus))
@@ -69,6 +79,8 @@ class ObdReadout:
                    + (f" ({describe_unavailable(missing)})" if missing else ""))
         if self.freeze_frame:
             out.append(f"Freeze frame for {self.freeze_frame['code']}")
+        elif "02" in self.not_read:
+            out.append("Freeze frame not read")
         if self.unsupported_modes:
             out.append("PCM does not support mode(s): " + ", ".join(self.unsupported_modes))
         return out + list(self.notes)
@@ -80,20 +92,62 @@ class ObdReadout:
                 "ecus": self.ecus, "primary_ecu": self.primary_ecu, "notes": self.notes,
                 "unavailable": [{"name": v.name, "reason": v.reason or "no_answer"}
                                 for v in self.live if not v.supported],
-                "adapter": self.adapter.to_dict()}
+                "adapter": self.adapter.to_dict(),
+                "stopped": self.stopped, "not_read": self.not_read}
+
+
+class _Interrupt:
+    """What the transport polls while it waits: a cancel, or a stop before the PCM has answered anything
+    (there is nothing to keep then, so a stop acts as a cancel)."""
+
+    def __init__(self, reader: "ObdReader"):
+        self.reader = reader
+
+    def is_set(self) -> bool:
+        r = self.reader
+        return bool((r.cancel is not None and r.cancel.is_set())
+                    or (r.stop is not None and r.stop.is_set() and not r.has_data))
+
+    def wait(self, seconds: float) -> bool:
+        end = time.monotonic() + seconds
+        while True:
+            if self.is_set():
+                return True
+            left = end - time.monotonic()
+            if left <= 0:
+                return False
+            time.sleep(min(0.02, left))
 
 
 class ObdReader:
     def __init__(self, transport: Transport, timeout: float = 5.0, first_timeout: float = 20.0,
-                 retry_pause: float = 0.3):
+                 retry_pause: float = 0.3, cancel=None, stop=None):
         self.t, self.timeout, self.first_timeout, self.retry_pause = transport, timeout, first_timeout, retry_pause
+        self.cancel, self.stop = cancel, stop
+        self.has_data, self._section = False, ""
+        self._interrupt = _Interrupt(self)
         self.raw: dict = {}
         self.primary = ""
         self.notes: list = []
         self._retries = 0
         self.unknown_from: int | None = None
 
+    def _check_interrupt(self) -> None:
+        if self.cancel is not None and self.cancel.is_set():
+            raise ObdCancelled()
+        if self.stop is not None and self.stop.is_set():
+            if not self.has_data:
+                raise ObdCancelled()                      # nothing to keep yet
+            raise ObdStopped()
+
+    def _pause(self, seconds: float) -> None:
+        if self.cancel is None and self.stop is None:
+            time.sleep(seconds)
+        elif self._interrupt.wait(seconds):
+            raise ObdCancelled()
+
     def _ask(self, cmd: str, timeout: float | None = None) -> str:
+        self._check_interrupt()
         resp = self.t.send(cmd, timeout or self.timeout)
         self.raw[cmd] = resp.strip()
         return resp
@@ -120,7 +174,7 @@ class ObdReader:
                 else:
                     who = "the PCM" if isinstance(e, ObdBusy) else "the adapter"
                     self.notes.append(f"Retried {cmd}: {who} reported {e.kind}.")
-                    time.sleep(self.retry_pause)
+                    self._pause(self.retry_pause)
 
     def _id(self, cmd: str, info: AdapterInfo) -> str:
         """One ID command's cleaned reply. '' when the adapter does not know it or it fails (noted)."""
@@ -176,6 +230,10 @@ class ObdReader:
         out = ObdReadout(sim=self.t.sim, read_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
         self.notes, self._retries = out.notes, 0
         self.unknown_from = None
+        self.has_data, self._section = False, ""
+        self._check_interrupt()
+        if self.cancel is not None or self.stop is not None:
+            self.t.cancel = self._interrupt
         self.t.open()
         try:
             for cmd in INIT:
@@ -186,6 +244,7 @@ class ObdReader:
                                             self.first_timeout)     # triggers protocol search
             if msgs is None:
                 raise ObdProtocolError("The vehicle did not answer. Is the key on?")
+            self.has_data, self._section = True, "maps"
             out.protocol = clean_id(self._ask("ATDPN"), "ATDPN")
             if not out.protocol:
                 raise ObdProtocolError("The adapter did not report its protocol.")
@@ -215,6 +274,8 @@ class ObdReader:
             self._codes(out, can)
             self._freeze(out)
             self._live(out, supported)
+        except ObdStopped:
+            self._finish_stopped(out)
         except BaseException:
             try:
                 self.t.close()
@@ -225,7 +286,22 @@ class ObdReader:
         out.raw = self.raw
         return out
 
+    def _finish_stopped(self, out: ObdReadout) -> None:
+        """Pressing Stop: keep the sections that finished, drop the one in progress, and say what was not read."""
+        sec = self._section
+        if sec in UNREAD_ORDER:
+            out.not_read = list(UNREAD_ORDER[UNREAD_ORDER.index(sec):])
+        elif sec in ("maps", "status"):
+            out.not_read = list(UNREAD_ORDER)
+        have = {v.pid for v in out.live}
+        for pid in LIVE_PIDS:
+            if pid not in have:
+                out.live.append(LiveValue(pid, PIDS[pid].name, PIDS[pid].unit, None, "stopped"))
+        out.stopped = True
+        out.notes.append("Stopped by you before the read finished.")
+
     def _status(self, out: ObdReadout) -> None:
+        self._section = "status"
         data, why = self._pid(0x01, 0x01)
         if not data:
             out.notes.append(f"Check engine light status unavailable: {REASON_TEXT[why or 'no_answer']} on 0101.")
@@ -234,6 +310,7 @@ class ObdReader:
 
     def _codes(self, out: ObdReadout, can: bool) -> None:
         for status, mode in STATUS_MODES:
+            self._section = f"{mode:02X}"
             res = self._by_ecu(mode)
             if res is None:
                 continue
@@ -248,6 +325,7 @@ class ObdReader:
                                       "description": P.describe_dtc(code) or ""})
 
     def _freeze(self, out: ObdReadout) -> None:
+        self._section = "02"
         data, why = self._pid(0x02, 0x02, frame=True)
         if why == "refused":
             out.unsupported_modes.append("02")
@@ -273,6 +351,7 @@ class ObdReader:
             out.freeze_frame["unavailable"] = unavailable
 
     def _live(self, out: ObdReadout, supported: set) -> None:
+        self._section = "live"
         for pid in LIVE_PIDS:
             p, value, reason = PIDS[pid], None, ""
             if pid in supported or self._unknown(pid):

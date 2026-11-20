@@ -37,17 +37,10 @@ def render(ctrl):
                 except ValueError as e:
                     st.error(str(e))
 
-    from case_ui import pick_obd_source
+    from case_ui import obd_panel, pick_obd_source
     with st.expander("Read OBD"):
         source = pick_obd_source("remote_obd")
-        if st.button("Read OBD", key="remote_obd", use_container_width=True, disabled=source is None):
-            readout, err = ctrl.read_obd(source)
-            if err:
-                st.error(err)
-            else:
-                st.success("Recorded in the case:")
-                for line in readout.lines():
-                    st.write("- " + line)
+        obd_panel(ctrl, source, "remote_obd", "Read OBD", full_width=True)
 
     state = snap["state"]
     if snap["running"]:

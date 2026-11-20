@@ -64,11 +64,16 @@ def describe(e: Event) -> str:
             codes = ", ".join(
                 f"{c.get('code', '?')} ({c.get('status', '?')}"
                 + (f", {c['ecu']}" if multi and c.get("ecu") else "") + ")" for c in d.get("codes", []))
-            unread = [str(m) for m in d.get("unsupported_modes") or []]
+            not_read = [str(m) for m in d.get("not_read") or []]
+            unread = [str(m) for m in d.get("unsupported_modes") or []] + not_read
             if not codes:
-                codes = ("no codes reported by the modes that were read" if unread
-                         else "no stored, pending or permanent codes")
-            return f"OBD read{sim}: {codes}" + (f"; modes not read: {', '.join(unread)}" if unread else "")
+                if {"03", "07", "0A"} <= set(not_read):
+                    codes = "codes not read"
+                else:
+                    codes = ("no codes reported by the modes that were read" if unread
+                             else "no stored, pending or permanent codes")
+            return (f"OBD read{sim}: {codes}" + (f"; modes not read: {', '.join(unread)}" if unread else "")
+                    + ("; stopped by you before it finished" if d.get("stopped") else ""))
         codes = ", ".join(c.get("code", "?") for c in d.get("codes", []))
         return f"Read codes: {codes}"
     if e.type == "hypothesis":
@@ -117,7 +122,7 @@ def build_summary(case: Case) -> Summary:
             s.obd_notes = [str(n) for n in e.data.get("notes") or []]
             s.obd_unavailable = [u for u in e.data.get("unavailable") or []
                                  if isinstance(u, dict) and u.get("reason") != "not_in_map"]
-            unread = set(e.data.get("unsupported_modes") or [])
+            unread = set(e.data.get("unsupported_modes") or []) | set(e.data.get("not_read") or [])
             for k, c in list(codes.items()):
                 if k not in now and _MODE_OF_STATUS.get(c.get("status")) not in unread:
                     codes[k] = {**c, "status": "not in latest OBD read"}
