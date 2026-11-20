@@ -37,6 +37,8 @@ class Controller:
         self._lock = threading.Lock()
         self._obd_lock = threading.Lock()
         self.obd_job: ObdJob | None = None
+        self.ai_control = False                   # set by the sidebar toggle; gates the MCP control tools
+        self.mcp = None                           # the running MCP server handle (crank.mcp_server)
         self.traffic = TrafficLog(logs_dir or Path(store.root).parent / "logs", session=self._log_session)
         self.connection = ObdConnection(log=self.traffic, heartbeat_s=heartbeat_s, read_lock=self._obd_lock)
 

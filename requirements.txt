@@ -7,3 +7,4 @@ pyusb>=1.2
 pytest>=8
 pyserial>=3.5
 segno>=1.6
+mcp>=2.3,<3
