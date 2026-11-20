@@ -102,9 +102,9 @@ temperature, fuel trims and a few more). Each read is added to the case: one `co
 every value the PCM answered. A value the PCM does not support is listed as not supported, never as zero, and a
 real 0 RPM is kept as 0. The tool never clears codes.
 
-The simulator has thirty scenarios (healthy, a stored P2119 with 0 RPM, many codes, a PCM with limited support, four
+The simulator has thirty-one scenarios (healthy, a stored P2119 with 0 RPM, many codes, a PCM with limited support, four
 failure modes, and five multi-ECU ones: `pcm_and_trans`, `interleaved_multiframe`, `same_code_two_ecus`, `pcm_not_7e8`,
-`trans_rejects_mode`, `slow_adapter` (every reply takes about a second, so you can try Stop and Cancel without hardware), and five for adapter trouble, below). **Real adapter** reads classic-Bluetooth ELM327/STN adapters (for example the OBDLink MX+) through
+`trans_rejects_mode`, `slow_adapter` (every reply takes about a second, so you can try Stop and Cancel without hardware), `heartbeat_drop` (the adapter stops answering its heartbeat after three beats, so you can watch Dropped and Relink), and five for adapter trouble, below). **Real adapter** reads classic-Bluetooth ELM327/STN adapters (for example the OBDLink MX+) through
 a serial port: pair the adapter in macOS Bluetooth settings first, then pick its port (or Auto-detect). Only
 read-only requests are ever sent: modes 01, 02, 03, 07 and 0A plus a fixed set of adapter setup commands. Anything
 that could write adapter memory or put it to sleep (`ATPP`, `STSAVCAL`, `STSLEEP`, ...) is refused before it reaches
@@ -134,6 +134,10 @@ simulator's `elm_clone` and `flaky_adapter_id` scenarios exercise it. Not yet ch
 
 **Stopping or cancelling a read.** A read runs in the background. While it runs, the Case page and the phone's Read OBD show "Reading from the vehicle… N s" with **Stop (keep what was read)** and **Cancel**, and the Read button is disabled; a second read from another device or tab is refused until it ends. **Cancel** stops the read within a fraction of a second, even during the protocol search, closes the adapter's port and records nothing: no event and no measurements, and the page says so. **Stop** ends the read at the next command and records what was read, marked as stopped: trouble-code modes and the freeze frame it did not reach are shown as "not read" (never as "none"), live values it did not reach are listed as "not read, stopped by you", and codes from an earlier read are not marked as gone. A Stop pressed before the vehicle has answered anything has nothing to keep and acts as Cancel. The simulator's `slow_adapter` scenario lets you try both without hardware. Not checked against a real adapter yet (#3).
 
+**Holding the adapter open.** Press **Connect** in the sidebar's "OBD adapter" block (or in the phone page's "OBD adapter connection" section) to keep the adapter open between reads; **Disconnect** closes it, so the MX+ is on the air only when you choose. The block shows the state (Disconnected, Connecting, Connected, Dropped, or the error), the adapter, its battery voltage, how long ago it last answered, and what the last read learned about the vehicle ("not checked" until a read finds out; Connect never asks the vehicle anything). While connected, the app sends the adapter a read-only `ATRV` (battery voltage) every five seconds when no read is running; two missed answers in a row mark the connection **Dropped** and close the port, and **Relink** opens it again (it is manual, nothing reconnects on its own). Reads on the open connection skip the reset and identification, so only the first one does the protocol search. Press Read with no connection and it opens and closes the port itself, as before. A cancelled or failed read leaves the port open and the next read does a full setup. A dropped connection refuses a read until you press Relink or Disconnect. The simulator's `heartbeat_drop` scenario lets you try this without hardware. Not checked against a real adapter yet (#3).
+
+**The log.** Every command and reply the adapter sees, every error and every connection or read event is written to `logs/obd.log` (about 5 MB per file, three files kept) and, without the heartbeat lines, to `sessions/<name>/obd.log` for the active session, including reads that were cancelled or failed. Each line has a time, the session, and `>>` (sent), `<<` (received), `!!` (error) or `**` (event); heartbeat lines are tagged `hb` and simulated traffic `sim`. The **Log** page shows the last 200 lines live, with a Pause toggle and a switch to hide heartbeats. The log is diagnostic: it is never part of the case or the report, and a log that cannot be written never stops a read (the sidebar says so).
+
 ## First session at the truck
 
 1. Wire the scope as in the table above. Close any other program holding the scope's USB connection.
@@ -161,12 +165,14 @@ simulator's `elm_clone` and `flaky_adapter_id` scenarios exercise it. Not yet ch
     crank/store.py       sessions on disk (captures, readings, notes)
     crank/case.py        a case: vehicle profile and the append-only event log
     crank/summary.py     structured, render-agnostic case summary
-    crank/obd/           OBD-II: protocol (pure parsing), pids, transport (interface and simulator), reader
+    crank/obd/           OBD-II: protocol (pure parsing), pids, transport (interface and simulator), reader,
+                         connection (held port and heartbeat), trafficlog (the adapter log)
     crank/render.py      Markdown and self-contained HTML reports
     crank/procedure.py   the guided test steps as data
     crank/report.py      text report and Plotly figures
     app.py               Streamlit UI (laptop)
     case_ui.py           the Case page
+    conn_ui.py           adapter connection status and buttons, the Log page
     remote.py            phone remote page
     crank_capture.py     command-line front end
     tests/               pytest suite (no hardware needed)

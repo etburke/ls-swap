@@ -14,9 +14,10 @@ from crank.report import build_figure, build_overlay, to_csv
 from crank.scope import RigolScope, ScopeError
 from crank.sim import SCENARIOS
 import case_ui
+import conn_ui
 import remote
 
-PAGES = ["Case", "Capture", "Results", "Guided tests", "Compare"]
+PAGES = ["Case", "Capture", "Results", "Guided tests", "Compare", "Log"]
 SEVERITY_ICON = {"fail": "🔴", "warn": "🟠", "info": "🟢"}
 
 is_remote = st.query_params.get("page") == "remote"
@@ -93,6 +94,9 @@ with st.sidebar:
             st.error(str(e))
     st.divider()
     st.radio("Page", PAGES, key="page")
+    st.divider()
+    st.subheader("OBD adapter")
+    conn_ui.connection_panel(ctrl, "obd")
     st.caption("Phone remote (same Wi-Fi):")
     st.code(f"http://{lan_ip()}:{st.get_option('server.port')}/?page=remote", language=None)
     ctrl.sync(mode=mode, scenario=ss.get("scenario"), session_name=ss.session_name,
@@ -316,4 +320,4 @@ def page_compare():
 
 
 {"Case": lambda: case_ui.render(ss), "Capture": page_capture, "Results": page_results,
- "Guided tests": page_guided, "Compare": page_compare}[ss.page]()
+ "Guided tests": page_guided, "Compare": page_compare, "Log": lambda: conn_ui.render_log(ctrl)}[ss.page]()

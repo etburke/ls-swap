@@ -28,6 +28,10 @@ class ObdProtocolError(ObdError):
     pass
 
 
+class ObdVehicleSilent(ObdProtocolError):
+    """The adapter is fine but the vehicle's first reply never came (key off, or the PCM is not answering)."""
+
+
 class ObdAdapterError(ObdProtocolError):
     """The adapter itself reported a fault. `kind` is the adapter's own term. A `transient` error is
     worth one retry; `reset` means the adapter lost its settings (LV RESET) and must be re-initialised."""

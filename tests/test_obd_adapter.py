@@ -1,6 +1,6 @@
 import pytest
 
-from crank.obd.adapter import AdapterInfo, clean_id, parse_sti
+from crank.obd.adapter import AdapterInfo, clean_id, parse_sti, parse_voltage
 
 
 @pytest.mark.parametrize("text,want", [
@@ -57,3 +57,14 @@ def test_dict_round_trip():
 def test_from_dict_tolerates_missing_and_odd_input(d):
     a = AdapterInfo.from_dict(d)
     assert a == AdapterInfo() and a.notes == []
+
+
+@pytest.mark.parametrize("text,want", [("12.4V", 12.4), ("\r12.4V\r\r", 12.4), ("ATRV\r11.9V", 11.9),
+                                        ("13V", 13.0), ("9.6 V", 9.6)])
+def test_parse_voltage_reads_a_voltage(text, want):
+    assert parse_voltage(text) == want
+
+
+@pytest.mark.parametrize("text", ["", "?", "NO DATA", "LV RESET", "ELM327 v1.5", "OK", "12.4"])
+def test_parse_voltage_rejects_everything_else(text):
+    assert parse_voltage(text) is None

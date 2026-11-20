@@ -49,3 +49,10 @@ def test_every_command_the_reader_sends_passes(name):
     assert sent
     for cmd in sent:
         check(cmd)
+
+
+def test_atrv_is_allowed_but_not_with_arguments():
+    assert check("atrv") == "ATRV" and check(" AT RV ") == "ATRV"
+    for bad in ("ATRV1", "ATRV 12", "ATRVX"):
+        with pytest.raises(ObdForbiddenCommand):
+            check(bad)

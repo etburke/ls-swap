@@ -148,8 +148,13 @@ def _obd():
     st.subheader("Read from the vehicle (OBD-II)")
     st.caption("A read adds the codes, freeze frame and live values to the case; it never clears codes. "
                "Real-adapter reads are recorded as real, not simulated.")
-    source = pick_obd_source("obd")
-    obd_panel(get_controller(), source, "obd_read", "Read from OBD")
+    ctrl = get_controller()
+    if ctrl.connection_status()["state"] == "connected":
+        st.caption("Using the open connection.")
+        source = "connection"
+    else:
+        source = pick_obd_source("obd")
+    obd_panel(ctrl, source, "obd_read", "Read from OBD")
 
 
 def _board(case, last_codes):

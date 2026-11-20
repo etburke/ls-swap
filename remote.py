@@ -17,6 +17,10 @@ def render(ctrl):
     what = snap["scenario"] if snap["mode"] == "Simulator" else "real scope"
     st.caption(f"{snap['mode']}: {what} · session {snap['session_name']}")
 
+    from conn_ui import connection_panel
+    with st.expander("OBD adapter connection"):
+        connection_panel(ctrl, "remote_obd")
+
     label = st.text_input("What changed? (label)", key="remote_label")
     if st.button("ARM", key="remote_arm", type="primary", use_container_width=True,
                  disabled=snap["running"]):
@@ -39,7 +43,11 @@ def render(ctrl):
 
     from case_ui import obd_panel, pick_obd_source
     with st.expander("Read OBD"):
-        source = pick_obd_source("remote_obd")
+        if ctrl.connection_status()["state"] == "connected":
+            st.caption("Using the open connection.")
+            source = "connection"
+        else:
+            source = pick_obd_source("remote_obd")
         obd_panel(ctrl, source, "remote_obd", "Read OBD", full_width=True)
 
     state = snap["state"]

@@ -181,3 +181,17 @@ def test_a_scenario_without_a_delay_answers_at_once():
     start = time.monotonic()
     t.send("ATZ")
     assert time.monotonic() - start < 0.5
+
+
+def test_the_sim_answers_atrv_with_a_voltage():
+    t = SimTransport("healthy"); t.open()
+    assert t.send("ATRV").strip() == "12.4V"
+
+
+def test_heartbeat_drop_stops_answering_atrv_after_three():
+    assert "heartbeat_drop" in SCENARIOS
+    t = SimTransport("heartbeat_drop"); t.open()
+    for _ in range(3):
+        assert t.send("ATRV").strip() == "12.4V"
+    with pytest.raises(ObdTimeout):
+        t.send("ATRV")

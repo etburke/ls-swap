@@ -7,7 +7,7 @@ import re
 
 from .errors import ObdForbiddenCommand
 
-AT_ALLOWED = frozenset({"ATZ", "ATE0", "ATL0", "ATS0", "ATH0", "ATH1", "ATSP0", "ATDPN", "ATDP", "ATI"})
+AT_ALLOWED = frozenset({"ATZ", "ATE0", "ATL0", "ATS0", "ATH0", "ATH1", "ATSP0", "ATDPN", "ATDP", "ATI", "ATRV"})
 ST_ALLOWED = frozenset({"STI", "STDI", "STSN"})        # identify the adapter; nothing else under ST*
 _OBD = (re.compile(r"01[0-9A-F]{2}"),          # live PID
         re.compile(r"02[0-9A-F]{4}"),          # freeze frame: PID + frame number
