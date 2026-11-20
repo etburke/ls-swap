@@ -93,6 +93,24 @@ class Controller:
         use = "the simulator" if have == "real" else "a real adapter"
         return f"This case already has {have} OBD reads. Start a new case to use {use}."
 
+    def delete_session(self, name: str) -> str | None:
+        """Delete a session. Returns a message if it could not be deleted, else None.
+        Moves off it first when it is the current one, so the traffic log does not recreate its folder."""
+        with self._lock:
+            if self.running and name == self.session_name:
+                return "A capture is running on this session; wait for it to finish."
+            job = self.obd_job
+            if job and job.running and job.session_name == name:
+                return "An OBD read is running on this session; wait for it or cancel it first."
+            if name == self.session_name:
+                self.session_name = next((n for n in self.store.list_sessions() if n != name), "default")
+            try:
+                self.store.delete_session(name)
+            except KeyError:
+                return f"There is no session '{name}'."
+            self.store.open(self.session_name)                # never leave the app with no session
+            return None
+
     def _log_session(self):
         return self.session_name, self.store.open(self.session_name).path
 

@@ -31,3 +31,22 @@ def test_store_survives_corrupt_files(tmp_path):
 def test_store_rejects_empty_session_name(tmp_path):
     with pytest.raises(ValueError):
         SessionStore(tmp_path).open("  !! ")
+
+
+def test_delete_session_removes_the_folder_and_nothing_else(tmp_path):
+    store = SessionStore(tmp_path)
+    store.open("keep").add_capture(generate("healthy", seconds=1), "ok")
+    store.open("drop").add_capture(generate("healthy", seconds=1), "ok")
+    store.delete_session("drop")
+    assert store.list_sessions() == ["keep"]
+    assert store.open("keep").list_captures()
+
+
+def test_delete_session_rejects_an_unknown_name_and_never_leaves_the_root(tmp_path):
+    store = SessionStore(tmp_path / "root")
+    (tmp_path / "outside").mkdir()
+    with pytest.raises(KeyError):
+        store.delete_session("nope")
+    with pytest.raises(KeyError):
+        store.delete_session("../outside")                # sanitised to a name that does not exist
+    assert (tmp_path / "outside").exists()

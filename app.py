@@ -17,6 +17,7 @@ import case_ui
 import conn_ui
 import remote
 
+NEW_TAB = "＋"                                         # last session tab: shows the create form
 PAGES = ["Case", "Capture", "Results", "Guided tests", "Compare", "Log"]
 SEVERITY_ICON = {"fail": "🔴", "warn": "🟠", "info": "🟢"}
 
@@ -49,6 +50,70 @@ def session():
     return ss.store.open(ss.session_name)
 
 
+def create_session():
+    """Button callback: runs before the rerun, so it may set the session tabs' own state."""
+    ss.new_session_error = None
+    if not ss.get("new_session", "").strip():
+        return
+    try:
+        ss.session_name = ss.store.open(ss.new_session).name
+    except ValueError as e:
+        ss.new_session_error = str(e)
+        return
+    ss.session_pick = ss.session_name
+    ss.new_session = ""
+
+
+def ask_delete():
+    ss.confirm_delete, ss.delete_error = ss.session_name, None
+
+
+def cancel_delete():
+    ss.confirm_delete = None
+
+
+def confirm_delete():
+    """Button callback: delete the session being asked about, then fall back to whichever the controller picked."""
+    name, ss.confirm_delete = ss.confirm_delete, None
+    err = ctrl.delete_session(name)
+    ss.delete_error = (name, err) if err else None
+    if not err:
+        ss.session_name = ss.session_pick = ctrl.session_name
+
+
+# ------------------------------------------------------------------ session toolbar
+# Runs before the sidebar: the sidebar's ctrl.sync needs the session picked here.
+with st.container(border=True):
+    names = ss.store.list_sessions()
+    if ss.session_name not in names:
+        session()                                         # make sure the active session exists
+        names = ss.store.list_sessions()
+    if ss.get("session_pick") not in names + [NEW_TAB]:
+        ss.session_pick = ss.session_name
+    tabs_col, new_col = st.columns([3, 2], vertical_alignment="bottom")
+    with tabs_col:
+        st.segmented_control("Session", names + [NEW_TAB], required=True, wrap=True, key="session_pick")
+    if ss.session_pick != NEW_TAB:
+        ss.session_name = ss.session_pick
+        new_col.button("🗑 Delete", key="delete_session", on_click=ask_delete)
+        if ss.get("confirm_delete") == ss.session_name:
+            n = len(session().list_captures())
+            st.warning(f"Delete **{ss.session_name}** with its {n} capture{'s' if n != 1 else ''}, "
+                       "case events and log? This can't be undone.")
+            yes_col, no_col, _ = st.columns([1, 1, 4])
+            yes_col.button("Yes, delete", key="delete_confirm", type="primary", on_click=confirm_delete)
+            no_col.button("Cancel", key="delete_cancel", on_click=cancel_delete)
+        if ss.get("delete_error") and ss.delete_error[0] == ss.session_name:
+            st.error(ss.delete_error[1])
+    else:
+        with new_col:
+            name_col, btn_col = st.columns([3, 1], vertical_alignment="bottom")
+            name_col.text_input("New session name", key="new_session")
+            btn_col.button("Create", key="create_session", on_click=create_session)
+        if ss.get("new_session_error"):
+            st.error(ss.new_session_error)
+
+
 # ------------------------------------------------------------------ sidebar
 with st.sidebar:
     st.title("Crank Test Harness")
@@ -78,20 +143,6 @@ with st.sidebar:
                 if ctrl.scope.log:
                     st.code("\n".join(ctrl.scope.log))
 
-    st.divider()
-    names = ss.store.list_sessions()
-    if ss.session_name not in names:
-        session()                                     # make sure the active session exists
-        names = ss.store.list_sessions()
-    st.selectbox("Session", names, index=names.index(ss.session_name), key="session_pick")
-    ss.session_name = ss.session_pick
-    new = st.text_input("New session name", key="new_session")
-    if st.button("Create session", key="create_session") and new.strip():
-        try:
-            ss.session_name = ss.store.open(new).name
-            st.rerun()
-        except ValueError as e:
-            st.error(str(e))
     st.divider()
     st.radio("Page", PAGES, key="page")
     st.divider()
