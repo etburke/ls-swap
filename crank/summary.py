@@ -27,6 +27,7 @@ class Summary:
     obd_notes: list = field(default_factory=list)        # notes from the latest OBD read (retries, resets, gaps)
     obd_unavailable: list = field(default_factory=list)  # [{"name","reason"}] it could not read; not_in_map left out
     captures: list = field(default_factory=list)        # [{"id","label","ts","sim","snapshot"}]
+    watches: list = field(default_factory=list)         # [{"id","ts","text","sim","capture_id"}]
     before_after: list = field(default_factory=list)    # [{"change","before","after"}]
     not_tried: list = field(default_factory=list)       # guided step titles with no data
     attachments: list = field(default_factory=list)
@@ -45,8 +46,41 @@ def _evidence(refs: dict) -> list:
     return out
 
 
+_WATCH_ENDS = {"stopped": "stopped by you", "buffer_full": "the adapter's buffer overflowed",
+               "reset": "the adapter reset", "silent": "no CAN traffic for 1 s",
+               "prompt": "the adapter left monitor mode", "until": "the linked capture ended",
+               "error": "the adapter link failed"}
+
+
+def _describe_watch(e: Event) -> str:
+    d, s = e.data, e.data.get("summary") or {}
+    sim = " [SIMULATED]" if d.get("sim") else ""
+    head = f"OBD watch {e.refs.get('watch', '?')}{sim}"
+    secs = f"{float(d.get('seconds') or 0):.1f} s"
+    if d.get("mode") == "poll":
+        rpm = s.get("rpm") or {}
+        top = "no answer to 010C" if rpm.get("max") is None else f"max {rpm['max']:,.0f} rpm"
+        text = f"{head} (poll, {secs}): {s.get('samples', 0):,} RPM samples (010C, official), {top}"
+        v = s.get("voltage")
+        if v:
+            text += f"; adapter voltage {v['min']:.1f}–{v['max']:.1f} V"
+    else:
+        n = len(s.get("ids") or {})
+        es = s.get("engine_speed")
+        speed = (f"engine speed (best-effort, ID 0C9) max {es['max']:,.0f} rpm" if es and es.get("max") is not None
+                 else "no engine speed frames seen")
+        text = (f"{head} (raw CAN, {secs}): {s.get('frames', 0):,} frames from {n} ID{'' if n == 1 else 's'}; "
+                f"{speed}")
+    end = d.get("end_reason")
+    if end and end != "time":
+        text += f"; stopped early: {_WATCH_ENDS.get(end, str(end).replace('_', ' '))}"
+    return text
+
+
 def describe(e: Event) -> str:
     d = e.data
+    if e.type == "watch":
+        return _describe_watch(e)
     if e.type == "measurement":
         where = f" ({d['where']})" if d.get("where") else ""
         cond = f", {d['conditions']}" if d.get("conditions") else ""
@@ -140,6 +174,8 @@ def build_summary(case: Case) -> Summary:
     s.captures = [dict(id=e.refs.get("capture", ""), label=e.text, ts=e.ts,
                        sim=bool(e.data.get("sim")), snapshot=e.data.get("snapshot")) for e in caps]
     by_id = {c["id"]: c for c in s.captures}
+    s.watches = [dict(id=e.refs.get("watch", ""), ts=e.ts, text=describe(e), sim=bool(e.data.get("sim")),
+                      capture_id=e.data.get("capture_id")) for e in events if e.type == "watch"]
 
     for i, e in enumerate(events):
         if e.type != "change":

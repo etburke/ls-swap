@@ -8,6 +8,36 @@ from crank.procedure import step_by_id
 from crank.store import SessionStore
 
 
+def _watch_meta(wid="001", mode="raw", sim=True, capture_id=None):
+    return {"id": wid, "label": "crank", "mode": mode, "sim": sim, "seconds": 18.4, "end_reason": "time",
+            "notes": [], "summary": {"frames": 3, "lines": 3, "ids": {}, "engine_speed": None},
+            "capture_id": capture_id}
+
+
+def test_append_watch_validates_mode_and_refs_capture(tmp_path):
+    case = Case(SessionStore(tmp_path).open("c"))
+    ev = case.append_watch(_watch_meta(capture_id="002"))
+    assert ev.type == "watch" and ev.refs == {"watch": "001", "capture": "002"}
+    assert ev.data == {"mode": "raw", "sim": True, "seconds": 18.4, "end_reason": "time", "notes": [],
+                       "summary": {"frames": 3, "lines": 3, "ids": {}, "engine_speed": None},
+                       "capture_id": "002"}
+    assert case.append_watch(_watch_meta("002")).refs == {"watch": "002"}
+    with pytest.raises(ValueError):
+        case.append_watch(_watch_meta(mode="sniff"))
+    with pytest.raises(ValueError):
+        case.append("watch", "", {})
+    assert [e.refs["watch"] for e in case.events()] == ["001", "002"]
+
+
+def test_obd_kinds_counts_watches(tmp_path):
+    case = Case(SessionStore(tmp_path).open("c"))
+    assert case.obd_kinds() == set()
+    case.append_watch(_watch_meta(sim=True))
+    assert case.obd_kinds() == {"simulated"}
+    case.append_watch(_watch_meta("002", sim=False))
+    assert case.obd_kinds() == {"real", "simulated"}
+
+
 @pytest.fixture
 def case(tmp_path):
     return Case(SessionStore(tmp_path).open("c"))

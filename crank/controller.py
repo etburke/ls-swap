@@ -16,6 +16,7 @@ from .obd.reader import ObdReader
 from .obd.serial_transport import SerialTransport, resolve_port
 from .obd.trafficlog import LoggingTransport, TrafficLog
 from .obd.transport import HeldTransport, SimTransport
+from .obd.watch import MAX_SECONDS, MODES, WatchJob
 from .scope import RigolScope, SimScope
 from .store import SessionStore
 
@@ -37,6 +38,7 @@ class Controller:
         self._lock = threading.Lock()
         self._obd_lock = threading.Lock()
         self.obd_job: ObdJob | None = None
+        self.watch_job: WatchJob | None = None
         self.ai_control = False                   # set by the sidebar toggle; gates the MCP control tools
         self.mcp = None                           # the running MCP server handle (crank.mcp_server)
         self.traffic = TrafficLog(logs_dir or Path(store.root).parent / "logs", session=self._log_session)
@@ -104,6 +106,9 @@ class Controller:
             job = self.obd_job
             if job and job.running and job.session_name == name:
                 return "An OBD read is running on this session; wait for it or cancel it first."
+            watch = self.watch_job
+            if watch and watch.running and watch.session_name == name:
+                return "A watch is running on this session; wait for it or stop it first."
             if name == self.session_name:
                 self.session_name = next((n for n in self.store.list_sessions() if n != name), "default")
             try:
@@ -200,6 +205,70 @@ class Controller:
         if job and job.running:
             job.stop()
 
+    def start_watch(self, mode: str = "raw", seconds: float = 20.0, label: str = "") -> str | None:
+        """Record the PCM on the standing connection in the background: raw CAN monitor lines or 010C polling.
+        Returns a message if it could not start, else None. Holds the read lock until the watch ends, so the
+        heartbeat, reads and a second watch keep off the adapter while it is in monitor mode."""
+        if self.connection.state != "connected":
+            return "Connect to the adapter first."
+        if mode not in MODES:
+            return "Mode must be 'raw' or 'poll'."
+        try:
+            seconds = float(seconds)
+        except (TypeError, ValueError):
+            seconds = float("nan")
+        if not 0 < seconds <= MAX_SECONDS:
+            return "Watch length must be between 1 and 120 seconds."
+        if not self._take_obd_lock():
+            return "An OBD read or watch is already running."
+        started = False
+        try:
+            conn = self.connection
+            if conn.state != "connected":                   # dropped while we waited for a heartbeat
+                return "Connect to the adapter first."
+            transport = HeldTransport(conn.transport)
+            wrong = self._wrong_kind(transport)
+            if wrong:
+                return wrong
+            sess = self.store.open(self.session_name)       # the watch goes to the case it was started on
+            case = Case(sess)
+
+            def saved(job: WatchJob) -> None:
+                # Runs on the watch thread while the read lock is still held: never take a lock here.
+                case.append_watch(job.meta)
+
+            def finished() -> None:
+                try:
+                    if job.restore_failed or job._reset:    # the adapter may have lost its settings
+                        conn.mark_cold()
+                    self.traffic.event(f"watch ended ({mode}, {(job.meta or {}).get('end_reason') or 'nothing kept'})")
+                finally:
+                    self._obd_lock.release()
+
+            job = WatchJob(transport, mode, sess.new_watch(), seconds=seconds, cold=conn.cold, sim=transport.sim,
+                           label=label, adapter=conn.adapter.label() if conn.adapter else "",
+                           session_name=self.session_name, on_finish=finished, on_saved=saved)
+            self.traffic.event(f"watch started ({mode}, {seconds:g} s)")
+            self.watch_job = job
+            job.start()
+            started = True
+            return None
+        finally:
+            if not started:
+                self._obd_lock.release()
+
+    def stop_watch(self) -> None:
+        """End the running watch and keep what was recorded."""
+        job = self.watch_job
+        if job and job.running:
+            job.stop()
+
+    def cancel_watch(self) -> None:
+        """Throw the running watch away; nothing is saved."""
+        job = self.watch_job
+        if job and job.running:
+            job.cancel()
+
     def read_obd(self, source="healthy"):
         """One OBD read into the current case, waiting for it to finish.
         Returns (readout, None) or (None, message)."""
@@ -250,6 +319,7 @@ class Controller:
     def connection_status(self) -> dict:
         s = self.connection.status()
         s["reading"] = bool(self.obd_job and self.obd_job.running)
+        s["watching"] = bool(self.watch_job and self.watch_job.running)
         s["traffic_error"] = self.traffic.last_error
         return s
 
