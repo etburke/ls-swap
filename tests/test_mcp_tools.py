@@ -365,3 +365,51 @@ def test_obd_relink_without_a_connection_explains(ctrl, tools):
     ctrl.ai_control = True
     with pytest.raises(ToolError, match="Nothing to relink"):
         tools.obd_relink()
+
+
+@pytest.mark.parametrize("call", [
+    lambda t: t.add_case_note("observation", "x"),
+    lambda t: t.set_suspect("Bad PCM"),
+])
+def test_write_tools_refuse_while_ai_control_is_off(ctrl, tools, call):
+    ctrl.sync(session_name="bench")
+    with pytest.raises(ToolError, match="AI control is off"):
+        call(tools)
+    assert ctrl.case().events() == []
+
+
+def test_add_case_note_records_an_ai_labeled_event(ctrl, tools):
+    ctrl.ai_control = True
+    ctrl.sync(session_name="bench")
+    r = tools.add_case_note("observation", "  5V reference sags to 3.4 V on cranking  ")
+    ev = ctrl.case().events()[0]
+    assert r == {"id": "e0001", "type": "observation", "session": "bench"}
+    assert (ev.type, ev.text, ev.source) == ("observation", "5V reference sags to 3.4 V on cranking", "mcp")
+    assert tools.get_case_summary()["timeline"][0]["source"] == "mcp"
+
+
+def test_add_case_note_is_limited_to_notes(ctrl, tools):
+    ctrl.ai_control = True
+    with pytest.raises(ToolError, match="type must be one of observation, symptom, change"):
+        tools.add_case_note("measurement", "12.6 V")
+    with pytest.raises(ToolError, match="needs some text"):
+        tools.add_case_note("observation", "   ")
+    assert ctrl.case().events() == []
+
+
+def test_set_suspect_creates_then_updates_by_title(ctrl, tools):
+    ctrl.ai_control = True
+    ctrl.sync(session_name="bench")
+    first = tools.set_suspect("Bad PCM")
+    assert first["suspect_id"] == "h1" and first["updated_existing"] is False
+    with pytest.raises(ToolError, match="needs a reason"):
+        tools.set_suspect("bad pcm", "ruled_out")                    # a status change needs the reason
+    second = tools.set_suspect("  bad PCM ", "ruled_out", "second PCM behaved the same")
+    assert second["suspect_id"] == "h1" and second["updated_existing"] is True
+    assert tools.set_suspect("Chafed harness")["suspect_id"] == "h2"
+    board = ctrl.case().hypotheses()
+    assert board["h1"].data["status"] == "ruled_out" and board["h1"].source == "mcp"
+    with pytest.raises(ToolError, match="unknown hypothesis status"):
+        tools.set_suspect("Chafed harness", "maybe")
+    with pytest.raises(ToolError, match="needs a title"):
+        tools.set_suspect("  ")

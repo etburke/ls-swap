@@ -371,3 +371,33 @@ class Tools:
         self._gate()
         self.ctrl.cancel_obd()
         return jsonable(self._obd_state())
+
+    # -- case writes (need Allow AI control; additions only, marked as AI-authored)
+    def add_case_note(self, type: str, text: str) -> dict[str, Any]:
+        """Add an observation, symptom or change to the current session's case. It is marked as added by an AI
+        assistant. Entries cannot be edited or deleted. Only record what was actually observed or done."""
+        self._gate()
+        if type not in NOTE_TYPES:
+            raise ToolError(f"type must be one of {', '.join(NOTE_TYPES)}.")
+        case = self._case(None)
+        try:
+            ev = case.append(type, text, source="mcp")
+        except ValueError as e:
+            raise ToolError(str(e)) from e
+        return {"id": ev.id, "type": ev.type, "session": case.name}
+
+    def set_suspect(self, title: str, status: str = "open", reason: str = "") -> dict[str, Any]:
+        """Add a suspect to the current case's board, or change an existing one (matched by title, ignoring
+        case). status is open, ruled_out or confirmed; ruled_out and confirmed need a reason that cites
+        evidence. It is marked as added by an AI assistant."""
+        self._gate()
+        case = self._case(None)
+        key = title.strip().lower()
+        hid = next((h for h, e in case.hypotheses().items()
+                    if str(e.data.get("title", "")).strip().lower() == key), None)
+        try:
+            ev = case.set_hypothesis(hid, title.strip(), status, reason.strip(), source="mcp")
+        except ValueError as e:
+            raise ToolError(str(e)) from e
+        return {"suspect_id": ev.data["hid"], "title": ev.data["title"], "status": status,
+                "updated_existing": hid is not None, "event": ev.id}
