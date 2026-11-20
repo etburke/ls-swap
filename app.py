@@ -149,7 +149,11 @@ with st.sidebar:
     st.subheader("OBD adapter")
     conn_ui.connection_panel(ctrl, "obd")
     st.caption("Phone remote (same Wi-Fi):")
-    st.code(f"http://{lan_ip()}:{st.get_option('server.port')}/?page=remote", language=None)
+    ip, port = lan_ip(), st.get_option("server.port")
+    st.code(f"http://{ip}:{port}/?page=remote", language=None)
+    if url := remote.remote_url(ip, port):
+        with st.expander("QR code"):
+            st.markdown(remote.qr_svg(url), unsafe_allow_html=True)
     ctrl.sync(mode=mode, scenario=ss.get("scenario"), session_name=ss.session_name,
               settings=ss.settings, thresholds=ss.thresholds)
 

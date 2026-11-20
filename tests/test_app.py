@@ -596,3 +596,31 @@ def test_delete_is_refused_with_a_message_while_a_read_runs(at, monkeypatch):
         assert at.session_state["session_name"] in get_controller().store.list_sessions()
     finally:
         gate.set()
+
+
+def test_remote_url_is_none_without_a_network_address():
+    import remote
+    assert remote.remote_url("192.168.1.5", 8501) == "http://192.168.1.5:8501/?page=remote"
+    assert remote.remote_url("localhost", 8501) is None
+
+
+def test_qr_svg_is_an_svg_and_depends_on_the_url():
+    import remote
+    a = remote.qr_svg("http://192.168.1.5:8501/?page=remote")
+    assert a.lstrip().startswith("<svg") and "</svg>" in a
+    assert a != remote.qr_svg("http://192.168.1.6:8501/?page=remote")
+
+
+def test_sidebar_offers_a_qr_code_for_the_phone_remote(at, monkeypatch):
+    monkeypatch.setattr("crank.controller.lan_ip", lambda: "192.168.1.5")
+    at.run()
+    assert not at.exception
+    assert any("QR code" in e.label for e in at.sidebar.expander)
+    assert any("192.168.1.5" in c.value for c in at.sidebar.code)
+
+
+def test_sidebar_has_no_qr_code_without_a_network_address(at, monkeypatch):
+    monkeypatch.setattr("crank.controller.lan_ip", lambda: "localhost")
+    at.run()
+    assert not at.exception
+    assert not any("QR code" in e.label for e in at.sidebar.expander)
