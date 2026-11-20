@@ -14,6 +14,7 @@ EXPECTED_TOOLS = {
     "get_case_report", "list_captures", "get_capture_analysis", "get_capture_signal", "compare_captures",
     "reanalyze_capture", "arm_capture", "cancel_capture", "obd_connect", "obd_disconnect", "obd_relink",
     "obd_read", "obd_stop", "obd_cancel", "add_case_note", "set_suspect",
+    "watch_progress", "list_watches", "get_watch", "obd_watch", "obd_watch_stop", "obd_watch_cancel",
 }
 
 
@@ -152,3 +153,18 @@ def test_restarting_on_the_same_port_right_after_use_is_not_reported_busy(ctrl):
         conn.recv(4096)                                                 # sits in TIME_WAIT
         stop_mcp_server(ctrl)
     assert ensure_mcp_server(ctrl, port).state == "running"
+
+
+def test_server_registers_the_watch_tools(ctrl):
+    new = {"watch_progress", "list_watches", "get_watch", "obd_watch", "obd_watch_stop", "obd_watch_cancel"}
+    assert new <= set(TOOL_NAMES)
+
+    async def go():
+        async with Client(build_server(ctrl)) as c:
+            names = {t.name for t in (await c.list_tools()).tools}
+            progress = (await c.call_tool("watch_progress", {})).structured_content
+            return names, progress
+    names, progress = asyncio.run(go())
+    assert new <= names and progress["state"] == "idle"
+    from crank.mcp_server import INSTRUCTIONS
+    assert "best-effort" in INSTRUCTIONS and "Polled 010C RPM is official OBD data." in INSTRUCTIONS
