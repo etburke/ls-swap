@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import socket
 import threading
+import time
 from pathlib import Path
 
 from .capture import CaptureJob
@@ -22,6 +23,19 @@ from .store import SessionStore
 
 SYNCABLE = ("mode", "scenario", "session_name", "settings", "thresholds")
 _SEVERITY_ORDER = {"fail": 0, "warn": 1, "info": 2}
+LINKED_TAIL_S = 2.0           # a linked watch records this long past the end of the capture's record time
+LINKED_START_S = 25.0         # how long a capture waits for its linked watch to be recording
+
+
+class _CaptureLink:
+    """A capture and its linked watch. Whichever is saved second writes the cross-reference, under `lock`
+    (never the read lock: the watch's saved callback runs while that is held)."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.watch: WatchJob | None = None
+        self.watch_id: str | None = None          # set once the watch is saved
+        self.capture_id: str | None = None        # set once the capture is in the case log
 
 
 class Controller:
@@ -39,6 +53,7 @@ class Controller:
         self._obd_lock = threading.Lock()
         self.obd_job: ObdJob | None = None
         self.watch_job: WatchJob | None = None
+        self._link: _CaptureLink | None = None    # the running capture's linked watch, if it asked for one
         self.ai_control = False                   # set by the sidebar toggle; gates the MCP control tools
         self.mcp = None                           # the running MCP server handle (crank.mcp_server)
         self.traffic = TrafficLog(logs_dir or Path(store.root).parent / "logs", session=self._log_session)
@@ -54,8 +69,11 @@ class Controller:
     def running(self) -> bool:
         return bool(self.job and self.job.running)
 
-    def arm(self, label: str = "", note: str = "") -> str | None:
-        """Start a capture. Returns a message if it could not start, else None."""
+    def arm(self, label: str = "", note: str = "", watch: bool = False, watch_mode: str = "raw") -> str | None:
+        """Start a capture. Returns a message if it could not start, else None.
+
+        With `watch`, an OBD watch is started on the capture's thread and recording before the scope is armed;
+        if it cannot start, the capture runs anyway and the reason is in snapshot()["watch_note"]."""
         with self._lock:
             if self.running:
                 return "A capture is already running."
@@ -67,13 +85,98 @@ class Controller:
                 return "Connect to the scope first (on the laptop)."
             sess = self.store.open(self.session_name)
             case = Case(sess)
+            link = _CaptureLink() if watch else None
+            sim_capture = self.mode == "Simulator"
+
+            def on_done(j: CaptureJob) -> None:
+                sim = bool(j.data and j.data.meta.get("sim"))
+                if link is None:
+                    case.append_capture(j.saved_id, label, j.analysis, sim)
+                    return
+                with link.lock:
+                    link.capture_id = j.saved_id
+                    if link.watch_id:                      # the watch was saved first
+                        sess.link_watch(link.watch_id, j.saved_id)
+                        link.watch.meta["capture_id"] = j.saved_id
+                    case.append_capture(j.saved_id, label, j.analysis, sim, watch_id=link.watch_id)
+
+            def before_arm(j: CaptureJob) -> str | None:
+                return self._start_linked_watch(j, link, sess, case, watch_mode, label, sim_capture)
+
             self.job = CaptureJob(
                 scope, self.settings, self.thresholds, poll_s=self.poll_s,
-                save=lambda d: sess.add_capture(d, label, note),
-                on_done=lambda j: case.append_capture(j.saved_id, label, j.analysis,
-                                                      bool(j.data and j.data.meta.get("sim"))))
+                save=lambda d: sess.add_capture(d, label, note), on_done=on_done,
+                before_arm=before_arm if link else None,
+                on_end=(lambda j: self._capture_ended(j, link)) if link else None)
+            self._link = link
             self.job.start()
             return None
+
+    def _start_linked_watch(self, cap: CaptureJob, link: _CaptureLink, sess, case: Case, mode: str, label: str,
+                            sim_capture: bool) -> str | None:
+        """The capture's before_arm hook, on the capture's thread: start the watch and wait until it is recording.
+        Returns why it did not start, else None."""
+        conn = self.connection
+        if conn.state != "connected":
+            return "Connect to the adapter first."
+        if mode not in MODES:
+            return "Mode must be 'raw' or 'poll'."
+        if sim_capture and conn.kind != "simulated":
+            return "A simulated capture is only linked to a simulated watch; the adapter connection is real."
+        if not sim_capture and conn.kind == "simulated":
+            return "A real capture is only linked to a real watch; the adapter connection is simulated."
+        s = cap.settings
+
+        def until() -> bool:
+            if not cap.running:
+                return True
+            t = cap.triggered_at
+            return t is not None and time.time() > t + s.seconds + LINKED_TAIL_S
+
+        job, err = self._start_watch(mode, None, label, sess, until=until, ceiling=s.wait + s.seconds + 10,
+                                     record=lambda w: self._watch_saved(w, cap, link, sess, case))
+        if err:
+            return err
+        link.watch = job
+        deadline = time.monotonic() + LINKED_START_S
+        while not job.monitoring.wait(0.05) and not cap.cancelled:
+            if not job.running:
+                return job.message or "The OBD watch ended before it was recording."
+            if time.monotonic() > deadline:
+                job.cancel()
+                return f"The OBD watch was not recording after {LINKED_START_S:g} s."
+        if cap.cancelled:
+            job.stop()                                     # a capture cancel keeps the watch
+        return None
+
+    @staticmethod
+    def _did_not_save(cap: CaptureJob) -> str:
+        return f"linked capture did not save: {cap.message}"
+
+    def _watch_saved(self, job: WatchJob, cap: CaptureJob, link: _CaptureLink, sess, case: Case) -> None:
+        """The linked watch's saved callback (watch thread, read lock held: only the link lock is taken here)."""
+        meta = job.meta
+        with link.lock:
+            link.watch_id = meta["id"]
+            meta["trigger_t"] = cap.triggered_at
+            if link.capture_id:                            # the capture was saved first
+                meta["capture_id"] = link.capture_id
+            elif not cap.running and cap.saved_id is None:
+                meta["notes"].append(self._did_not_save(cap))
+            job.writer.finish(meta)                        # rewrite the meta with the trigger time and note
+            if link.capture_id:
+                sess.link_watch(meta["id"], link.capture_id)
+            case.append_watch(meta)
+
+    def _capture_ended(self, cap: CaptureJob, link: _CaptureLink) -> None:
+        """The capture's on_end hook: a watch saved before the capture failed gets the note in its meta."""
+        with link.lock:
+            job = link.watch
+            if cap.saved_id is None and link.watch_id and job is not None:
+                note = self._did_not_save(cap)
+                if note not in job.meta["notes"]:
+                    job.meta["notes"].append(note)
+                    job.writer.finish(job.meta)
 
     def case(self) -> Case:
         return Case(self.store.open(self.session_name))
@@ -86,11 +189,11 @@ class Controller:
             return SerialTransport(resolve_port(value))
         raise ObdError(f"Unknown OBD source {kind!r}.")
 
-    def _wrong_kind(self, transport) -> str:
-        """'' if this read may go into the current case, else why not. A case holds real OBD reads or
-        simulated ones, never both, so a practice run cannot be mistaken for evidence."""
+    def _wrong_kind(self, transport, case: Case | None = None) -> str:
+        """'' if this read may go into the case (default: the current one), else why not. A case holds real OBD
+        reads or simulated ones, never both, so a practice run cannot be mistaken for evidence."""
         kind = "simulated" if transport.sim else "real"
-        others = self.case().obd_kinds() - {kind}
+        others = (case or self.case()).obd_kinds() - {kind}
         if not others:
             return ""
         have = sorted(others)[0]
@@ -219,23 +322,33 @@ class Controller:
             seconds = float("nan")
         if not 0 < seconds <= MAX_SECONDS:
             return "Watch length must be between 1 and 120 seconds."
+        return self._start_watch(mode, seconds, label)[1]
+
+    def _start_watch(self, mode: str, seconds: float | None, label: str, sess=None, *, until=None,
+                     ceiling: float = MAX_SECONDS, record=None) -> tuple[WatchJob | None, str | None]:
+        """Start a watch into `sess` (default: the current session). `seconds=None` with `until`/`ceiling` is a
+        capture-linked watch; `record(job)` replaces recording the saved watch in the case.
+        Returns (job, None), or (None, why it could not start)."""
         if not self._take_obd_lock():
-            return "An OBD read or watch is already running."
+            return None, "An OBD read or watch is already running."
         started = False
         try:
             conn = self.connection
             if conn.state != "connected":                   # dropped while we waited for a heartbeat
-                return "Connect to the adapter first."
+                return None, "Connect to the adapter first."
             transport = HeldTransport(conn.transport)
-            wrong = self._wrong_kind(transport)
-            if wrong:
-                return wrong
-            sess = self.store.open(self.session_name)       # the watch goes to the case it was started on
+            sess = sess or self.store.open(self.session_name)   # the watch goes to the case it was started on
             case = Case(sess)
+            wrong = self._wrong_kind(transport, case)
+            if wrong:
+                return None, wrong
 
             def saved(job: WatchJob) -> None:
-                # Runs on the watch thread while the read lock is still held: never take a lock here.
-                case.append_watch(job.meta)
+                # Runs on the watch thread while the read lock is still held: never take the read lock here.
+                if record:
+                    record(job)
+                else:
+                    case.append_watch(job.meta)
 
             def finished() -> None:
                 try:
@@ -245,14 +358,16 @@ class Controller:
                 finally:
                     self._obd_lock.release()
 
-            job = WatchJob(transport, mode, sess.new_watch(), seconds=seconds, cold=conn.cold, sim=transport.sim,
-                           label=label, adapter=conn.adapter.label() if conn.adapter else "",
-                           session_name=self.session_name, on_finish=finished, on_saved=saved)
-            self.traffic.event(f"watch started ({mode}, {seconds:g} s)")
+            job = WatchJob(transport, mode, sess.new_watch(), seconds=seconds, until=until, ceiling=ceiling,
+                           cold=conn.cold, sim=transport.sim, label=label,
+                           adapter=conn.adapter.label() if conn.adapter else "",
+                           session_name=sess.name, on_finish=finished, on_saved=saved)
+            length = "linked to a capture" if seconds is None else f"{seconds:g} s"
+            self.traffic.event(f"watch started ({mode}, {length})")
             self.watch_job = job
             job.start()
             started = True
-            return None
+            return job, None
         finally:
             if not started:
                 self._obd_lock.release()
@@ -326,6 +441,9 @@ class Controller:
     def cancel(self) -> None:
         if self.job:
             self.job.cancel()
+            link = self._link
+            if link and link.watch and link.watch.running:
+                link.watch.stop()                          # a capture cancel keeps its watch
 
     def snapshot(self) -> dict:
         job = self.job
@@ -333,6 +451,7 @@ class Controller:
                     state=job.state if job else "idle", message=job.message if job else "",
                     running=self.running, seconds_left=job.seconds_left if job else 0.0,
                     saved_id=job.saved_id if job else None, hook_error=job.hook_error if job else "",
+                    watch_note=job.note if job else "",
                     findings=[], warnings=[])
         if job and job.analysis:
             snap["findings"] = [{"severity": f.severity, "title": f.title}

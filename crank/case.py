@@ -200,9 +200,12 @@ class Case:
                 f.write(lead + ev.to_json() + "\n")
         return ev
 
-    def append_capture(self, capture_id: str, label: str, analysis, sim: bool) -> Event:
-        return self.append("capture", label, {"snapshot": capture_snapshot(analysis), "sim": sim},
-                           {"capture": capture_id})
+    def append_capture(self, capture_id: str, label: str, analysis, sim: bool,
+                       watch_id: str | None = None) -> Event:
+        refs = {"capture": capture_id}
+        if watch_id:
+            refs["watch"] = watch_id
+        return self.append("capture", label, {"snapshot": capture_snapshot(analysis), "sim": sim}, refs)
 
     def append_obd(self, readout) -> list[Event]:
         """Record one OBD read: a code_read (empty list = a clean read) plus a measurement per live value."""
