@@ -350,6 +350,14 @@ def test_change_entry_can_name_its_before_and_after_captures(at):
     assert ev.refs == {"before": ids[0], "after": ids[1]}
 
 
+def test_create_session_makes_it_the_active_one(at):
+    at.sidebar.text_input(key="new_session").set_value("fresh").run()
+    at.sidebar.button(key="create_session").click().run()
+    assert not at.exception
+    assert at.session_state["session_name"] == "fresh"
+    assert at.sidebar.selectbox(key="session_pick").value == "fresh"
+
+
 def _waiting_read(monkeypatch, after=0):
     """Make the next OBD read wait once `after` commands were sent. Returns the event that lets it go on.
     after=0 waits before the PCM has answered anything; after=11 waits right after the first 0100 answer."""
