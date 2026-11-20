@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import copy
+import math
 import threading
 import time
 from typing import Callable
 from itertools import zip_longest
 from dataclasses import dataclass, field
 
+from . import allowlist
 from .errors import ObdCancelled, ObdNoAdapter, ObdTimeout
 from .protocol import request
 
@@ -149,6 +151,7 @@ class Scenario:
     pid_nrc: dict = field(default_factory=dict)         # request -> {"nrc", "times"}: the PCM answers 7F <mode> <nrc>
     no_answer_pids: tuple = ()                          # requests that draw NO DATA though the map lists them
     fault: str | None = None                           # silent | no_adapter | no_vehicle | garbage | drop_after:N
+    monitor: str = "running"                           # ATMA output: running | crank_rpm | crank_no_rpm | overflow | reset
 
 
 LIVE_RUNNING = {0x0C: bytes([0x0B, 0xB8]), 0x42: bytes([0x36, 0xB0]), 0x05: bytes([0x82]), 0x0D: bytes([0]),
@@ -200,7 +203,21 @@ SCENARIOS = {
     "no_vehicle": Scenario(fault="no_vehicle"),
     "garbage": Scenario(fault="garbage"),
     "drops_mid_read": Scenario(values=LIVE_RUNNING, fault="drop_after:12"),
+    "cranking_rpm_seen": Scenario(values=LIVE_CRANKING, monitor="crank_rpm"),
+    "cranking_no_rpm": Scenario(values=LIVE_CRANKING, monitor="crank_no_rpm"),
+    "monitor_overflow": Scenario(values=LIVE_RUNNING, monitor="overflow"),
+    "reset_mid_watch": Scenario(values=LIVE_RUNNING, monitor="reset"),
 }
+
+MONITOR_OVERFLOW_AT = 0.5                              # seconds into the stream
+MONITOR_RESET_AT = 0.6
+
+
+def crank_rpm(t: float) -> float:
+    """The simulated cranking curve: 0 rpm before 0.3 s, 180-220 rpm (deterministic ripple) to 1.3 s, 0 after."""
+    if 0.3 <= t < 1.3:
+        return 200 + 20 * math.sin(2 * math.pi * 5 * (t - 0.3))
+    return 0.0
 
 
 class SimTransport(Transport):
@@ -214,6 +231,7 @@ class SimTransport(Transport):
         self.searched, self.errors_left = False, self.sc.error_times
         self.nrc_left: dict = {}
         self.atrv_n = 0
+        self.poll_t0: float | None = None              # when the first 010C came (start of the poll crank curve)
 
     def open(self) -> None:
         if self.sc.fault == "no_adapter":
@@ -249,6 +267,55 @@ class SimTransport(Transport):
                 self.headers, self.searched = False, False
             return self.sc.error_text
         return self._obd(cmd)
+
+    def stream(self, cmd: str, on_line: Callable[[float, str], None], stop: threading.Event,
+               max_seconds: float, silence_s: float = 1.0) -> StreamEnd:
+        allowlist.check(cmd)
+        if not self.opened:
+            raise ObdNoAdapter("The adapter is not open.")
+        self.check_cancel()
+        mode, start, ms = self.sc.monitor, time.monotonic(), 0
+        end_at = {"overflow": MONITOR_OVERFLOW_AT, "reset": MONITOR_RESET_AT}.get(mode)
+        while True:
+            if stop.is_set():
+                return StreamEnd("stopped")
+            self.check_cancel()
+            t = time.monotonic() - start
+            if t >= max_seconds:
+                return StreamEnd("time")
+            if end_at is not None and t >= end_at:
+                if mode == "reset":
+                    self.headers, self.searched = False, False
+                return StreamEnd("buffer_full" if mode == "overflow" else "reset")
+            while ms / 1000 <= t:
+                for line in self._monitor_lines(ms):
+                    on_line(time.time(), line)
+                    if stop.is_set():
+                        return StreamEnd("stopped")
+                ms += 10
+            time.sleep(0.01)
+
+    def _monitor_lines(self, ms: int) -> list[str]:
+        """The frames due at `ms` milliseconds into the stream: 0C9 every 20 ms, 1A1 every 50, 3C1 every 100."""
+        out = []
+        if ms % 20 == 0:
+            rpm = self._rpm_at(ms / 1000)
+            raw = round(rpm * 4)
+            out.append(f"0C9800{raw >> 8 & 0xFF:02X}{raw & 0xFF:02X}0000000000")
+        if ms % 50 == 0:
+            out.append("1A18" + "00" * 8)
+        if ms % 100 == 0:
+            out.append("3C18" + "00" * 8)
+        return out
+
+    def _rpm_at(self, t: float) -> float:
+        """Engine speed the scenario shows `t` seconds into a stream or poll sequence."""
+        if self.sc.monitor == "crank_rpm":
+            return crank_rpm(t)
+        if self.sc.monitor == "crank_no_rpm":
+            return 0.0
+        v = self.sc.values.get(0x0C, bytes([0, 0]))
+        return (v[0] * 256 + v[1]) / 4
 
     def _wait(self, seconds: float) -> None:
         """Sleep `seconds`, but give up at once when an interrupt arrives."""
@@ -359,6 +426,11 @@ class SimTransport(Transport):
                 return bytes([0x41, pid]) + _enc_pid_bitmap(sup, pid)
             if pid == 0x01:
                 return bytes([0x41, 0x01, (0x80 if sc.mil else 0) | len(sc.stored), 0, 0, 0])
+            if pid == 0x0C and pid in sc.values and sc.monitor in ("crank_rpm", "crank_no_rpm"):
+                if self.poll_t0 is None:
+                    self.poll_t0 = time.monotonic()
+                raw = round(self._rpm_at(time.monotonic() - self.poll_t0) * 4)
+                return bytes([0x41, pid, raw >> 8 & 0xFF, raw & 0xFF])
             if pid in sc.values:
                 return bytes([0x41, pid]) + sc.values[pid]
             return None
