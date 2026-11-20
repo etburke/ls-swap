@@ -91,3 +91,100 @@ def test_get_obd_log_tails_the_session_log(ctrl, tools):
 def test_get_obd_log_rejects_silly_line_counts(tools, n):
     with pytest.raises(ToolError, match="lines must be between"):
         tools.get_obd_log(lines=n)
+
+
+from crank.sim import generate
+
+
+def test_every_read_tool_copes_with_a_brand_new_empty_session(ctrl, tools):
+    ctrl.sync(session_name="fresh")
+    summary = tools.get_case_summary()
+    assert summary["empty"] is True and summary["timeline"] == []
+    assert tools.list_captures() == {"session": "fresh", "captures": []}
+    assert "Nothing has been recorded" in tools.get_case_report()["text"]
+    json.dumps(summary, allow_nan=False)
+
+
+def test_get_case_summary_returns_the_timeline_and_suspects(ctrl, tools):
+    make_capture(ctrl, label="baseline")
+    ctrl.case().append("observation", "smells like fuel")
+    ctrl.case().set_hypothesis(None, "Bad ground")
+    s = tools.get_case_summary()
+    assert s["empty"] is False
+    assert any("baseline" in t["line"] for t in s["timeline"])
+    assert [r["title"] for r in s["open"]] == ["Bad ground"]
+    json.dumps(s, allow_nan=False)
+
+
+def test_get_case_report_formats(ctrl, tools):
+    make_capture(ctrl)
+    md = tools.get_case_report()
+    assert md["format"] == "markdown" and "Diagnostic summary" in md["text"]
+    assert "<html" in tools.get_case_report(format="html")["text"]
+    with pytest.raises(ToolError, match="markdown.*html"):
+        tools.get_case_report(format="pdf")
+
+
+def test_list_captures_gives_label_time_and_verdict_headline(ctrl, tools):
+    make_capture(ctrl, "ref_sag", "baseline")
+    caps = tools.list_captures()["captures"]
+    assert [(c["id"], c["label"], c["sim"]) for c in caps] == [("001", "baseline", True)]
+    assert caps[0]["verdict"].startswith("5V reference sags") and caps[0]["time"]
+
+
+def test_get_capture_analysis_returns_ranked_findings_and_the_recorded_verdict(ctrl, tools):
+    cid = make_capture(ctrl, "ref_sag")
+    a = tools.get_capture_analysis(cid)
+    json.dumps(a, allow_nan=False)
+    assert a["findings"][0]["code"] == "ref_sag" and a["findings"][0]["severity"] == "fail"
+    assert a["capture"]["id"] == cid and a["thresholds"]["ref_sag_mv"] == 300.0
+    assert a["recorded_verdict"][0]["code"] == "ref_sag"
+    assert a["signals"]["ch1"]["n_edges"] > 0 and a["supply"]["ref_sag_mv"] > 300
+
+
+def test_get_capture_analysis_caps_a_long_event_list(ctrl, tools):
+    cid = make_capture(ctrl, "ref_sag")                 # this scenario has hundreds of runt pulses
+    a = tools.get_capture_analysis(cid)
+    assert len(a["events"]) <= 200 and a["events_total"] >= len(a["events"])
+    assert a["events_total"] > 200
+
+
+def test_an_unknown_capture_lists_the_real_ones(ctrl, tools):
+    make_capture(ctrl)
+    with pytest.raises(ToolError, match="no capture '009'.*001"):
+        tools.get_capture_analysis("009")
+    with pytest.raises(ToolError, match="no capture '../x'"):
+        tools.get_capture_signal("../x", 1)
+
+
+def test_get_capture_signal_downsamples_but_keeps_the_extremes(ctrl, tools):
+    cid = make_capture(ctrl, "ref_sag")
+    data = ctrl.store.open("bench").load_capture(cid)
+    sig = tools.get_capture_signal(cid, 3, max_points=500)
+    json.dumps(sig, allow_nan=False)
+    assert len(sig["t"]) == len(sig["v"]) <= 500 and sig["samples_in_window"] == len(data.t)
+    assert min(sig["v"]) == pytest.approx(float(data.channels[3].min()), abs=1e-4)   # the deepest sag survives
+    assert sig["label"] == "5V ref @ sensor" and sig["unit"] == "V"
+
+
+def test_get_capture_signal_window_and_validation(ctrl, tools):
+    cid = make_capture(ctrl)
+    sig = tools.get_capture_signal(cid, 1, start=0.5, end=0.6, max_points=5000)
+    assert sig["t"][0] >= 0.5 and sig["t"][-1] <= 0.6 and sig["returned"] == len(sig["t"])
+    with pytest.raises(ToolError, match="Channel 9 was not captured.*1, 2, 3, 4"):
+        tools.get_capture_signal(cid, 9)
+    with pytest.raises(ToolError, match="max_points must be between 2 and 5000"):
+        tools.get_capture_signal(cid, 1, max_points=10_000)
+    with pytest.raises(ToolError, match="No samples between 50 and 60 s.*runs from"):
+        tools.get_capture_signal(cid, 1, start=50, end=60)
+
+
+def test_get_capture_signal_survives_invalid_samples_and_counts_them(ctrl, tools):
+    d = generate("healthy", seconds=1.0)
+    d.channels[1][1_000:30_000] = np.nan                # a stretch of failed samples
+    cid = ctrl.store.open("bench").add_capture(d, "damaged")
+    ctrl.sync(session_name="bench")
+    sig = tools.get_capture_signal(cid, 1, max_points=400)
+    json.dumps(sig, allow_nan=False)
+    assert sig["nan_samples"] == 29_000
+    assert tools.get_capture_analysis(cid)["findings"]    # the analysis still answers (bad_samples warning)
