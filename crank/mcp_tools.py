@@ -12,7 +12,8 @@ import numpy as np
 from mcp.server.mcpserver.exceptions import ToolError
 
 from .analysis import Analysis, analyze_capture
-from .case import Case
+from .case import Case, capture_snapshot
+from .model import Thresholds
 from .obd.trafficlog import tail_lines
 from .render import to_html, to_markdown
 from .report import decimate
@@ -98,6 +99,18 @@ class Tools:
             if e.type == "capture" and e.refs.get("capture") == capture_id and e.data.get("snapshot"):
                 return e.data["snapshot"].get("verdict")
         return None
+
+    @staticmethod
+    def _overrides(raw: dict) -> dict:
+        valid = {f.name: f for f in dataclasses.fields(Thresholds)}
+        out = {}
+        for key, value in raw.items():
+            if key not in valid:
+                raise ToolError(f"Unknown threshold {key!r}. Valid thresholds: {', '.join(valid)}.")
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ToolError(f"Threshold {key!r} must be a finite number.")
+            out[key] = int(value) if valid[key].type in (int, "int") else float(value)
+        return out
 
     def _obd_state(self) -> dict:
         job = self.ctrl.obd_job
@@ -217,3 +230,41 @@ class Tools:
                          "samples_in_window": len(v), "returned": len(td),
                          "nan_samples": int((~np.isfinite(v)).sum()),
                          "method": "min/max envelope per bin" if len(td) < len(v) else "every sample"})
+
+    def compare_captures(self, capture_a: str, capture_b: str, session: str | None = None) -> dict[str, Any]:
+        """Two captures side by side under the laptop's current thresholds: each one's findings and headline
+        numbers, then what is only in A, only in B, and how each number changed (B minus A). Use it for
+        before/after questions."""
+        sess = self._session(session)
+        labels = {c["id"]: c.get("label", "") for c in sess.list_captures()}
+        snaps = {}
+        for cid in (capture_a, capture_b):
+            snaps[cid] = capture_snapshot(analyze_capture(self._load(sess, cid), self.ctrl.thresholds))
+        a, b = snaps[capture_a], snaps[capture_b]
+
+        def codes(s):
+            return [v["code"] for v in s["verdict"]]
+
+        numbers = {}
+        for k in ("edges", "revs", "revs_good", "rpm", "ref_sag_mv", "gnd_dev_mv"):
+            av, bv = a[k], b[k]
+            numbers[k] = {"a": av, "b": bv, "change": None if av is None or bv is None else bv - av}
+        return jsonable({
+            "session": sess.name,
+            "a": {"capture": capture_a, "label": labels[capture_a], **a},
+            "b": {"capture": capture_b, "label": labels[capture_b], **b},
+            "differences": {"only_in_a": [c for c in codes(a) if c not in codes(b)],
+                            "only_in_b": [c for c in codes(b) if c not in codes(a)],
+                            "numbers": numbers}})
+
+    def reanalyze_capture(self, capture_id: str, thresholds: dict[str, float] | None = None,
+                          session: str | None = None) -> dict[str, Any]:
+        """A what-if: analyze a saved capture again with some thresholds changed (for example
+        {"ref_sag_mv": 200}). Nothing is saved and the laptop's thresholds are not changed. Valid names are
+        the fields of the analysis thresholds (hi, lo, runt_hi, runt_lo, teeth, min_edges, skip_first_edges,
+        ref_nominal, ref_sag_mv, ground_mv, event_window_s)."""
+        sess = self._session(session)
+        data = self._load(sess, capture_id)
+        th = dataclasses.replace(self.ctrl.thresholds, **self._overrides(thresholds or {}))
+        return {"saved": False, "capture": capture_id, "thresholds": jsonable(dataclasses.asdict(th)),
+                **analysis_dict(analyze_capture(data, th))}

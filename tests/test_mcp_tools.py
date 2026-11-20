@@ -188,3 +188,51 @@ def test_get_capture_signal_survives_invalid_samples_and_counts_them(ctrl, tools
     json.dumps(sig, allow_nan=False)
     assert sig["nan_samples"] == 29_000
     assert tools.get_capture_analysis(cid)["findings"]    # the analysis still answers (bad_samples warning)
+
+
+def test_compare_captures_shows_what_changed(ctrl, tools):
+    a = make_capture(ctrl, "ref_sag", "before")
+    b = make_capture(ctrl, "healthy", "after")
+    c = tools.compare_captures(a, b)
+    json.dumps(c, allow_nan=False)
+    assert c["a"]["label"] == "before" and c["b"]["label"] == "after"
+    assert "ref_sag" in c["differences"]["only_in_a"] and "signal_clean" in c["differences"]["only_in_b"]
+    sag = c["differences"]["numbers"]["ref_sag_mv"]
+    assert sag["a"] > 300 and sag["change"] == pytest.approx(sag["b"] - sag["a"]) and sag["change"] < 0
+
+
+def test_compare_a_capture_with_itself_has_no_differences(ctrl, tools):
+    a = make_capture(ctrl)
+    d = tools.compare_captures(a, a)["differences"]
+    assert d["only_in_a"] == d["only_in_b"] == [] and d["numbers"]["revs"]["change"] == 0
+
+
+def test_compare_with_an_unknown_capture_is_refused(ctrl, tools):
+    a = make_capture(ctrl)
+    with pytest.raises(ToolError, match="no capture '009'"):
+        tools.compare_captures(a, "009")
+
+
+def test_reanalyze_applies_thresholds_without_saving_anything(ctrl, tools):
+    cid = make_capture(ctrl, "ref_sag")
+    sess = ctrl.store.open("bench")
+    files_before = sorted(p.name for p in (sess.path / "captures").iterdir())
+    events_before = len(ctrl.case().events())
+    r = tools.reanalyze_capture(cid, {"ref_sag_mv": 5000})
+    assert r["saved"] is False and r["thresholds"]["ref_sag_mv"] == 5000.0
+    assert "ref_sag" not in [f["code"] for f in r["findings"]]
+    assert ctrl.thresholds.ref_sag_mv == 300.0                       # the laptop's thresholds are untouched
+    assert sorted(p.name for p in (sess.path / "captures").iterdir()) == files_before
+    assert len(ctrl.case().events()) == events_before
+
+
+def test_reanalyze_validates_thresholds(ctrl, tools):
+    cid = make_capture(ctrl)
+    with pytest.raises(ToolError, match="Unknown threshold 'bogus'.*ref_sag_mv"):
+        tools.reanalyze_capture(cid, {"bogus": 1})
+    with pytest.raises(ToolError, match="must be a finite number"):
+        tools.reanalyze_capture(cid, {"hi": "high"})
+    with pytest.raises(ToolError, match="must be a finite number"):
+        tools.reanalyze_capture(cid, {"hi": float("nan")})
+    teeth = tools.reanalyze_capture(cid, {"teeth": 58.0})["thresholds"]["teeth"]
+    assert teeth == 58 and type(teeth) is int                        # integer fields stay integers
