@@ -140,6 +140,49 @@ simulator's `elm_clone` and `flaky_adapter_id` scenarios exercise it. Not yet ch
 
 **The log.** Every command and reply the adapter sees, every error and every connection or read event is written to `logs/obd.log` (about 5 MB per file, three files kept) and, without the heartbeat lines, to `sessions/<name>/obd.log` for the active session, including reads that were cancelled or failed. Each line has a time, the session, and `>>` (sent), `<<` (received), `!!` (error) or `**` (event); heartbeat lines are tagged `hb` and simulated traffic `sim`. The **Log** page shows the last 200 lines live, with a Pause toggle and a switch to hide heartbeats. The log is diagnostic: it is never part of the case or the report, and a log that cannot be written never stops a read (the sidebar says so).
 
+### OBD watch
+
+A watch answers one question: does the PCM report RPM while the engine cranks? It records the PCM continuously for
+a while (in the background) so a few seconds of cranking are caught, and it needs the standing connection (press
+**Connect** first; otherwise it says "Connect to the adapter first."). It lives on the Case page ("Watch the PCM
+(OBD-II)"), in the phone's "Watch OBD" section, and in the MCP tools below. It only listens or sends the same
+read-only requests as a read; it never transmits on the bus.
+
+- **Raw CAN (default).** Passive monitor: the adapter is put in listen-only mode (`ATCSM1`, so it sends no ACKs) and
+  logs every frame it hears. Decoding is best-effort: the one decoder so far reads engine speed from ID `0C9`
+  (bytes 1-2, big-endian, times 0.25 rpm). Every decoded value is marked best-effort and carries its source ID and
+  a decoder version (`0C9-engine-speed-v1: bytes[1:3] BE x0.25`), which is saved with the watch. Treat it as a
+  lead, not a measurement; absence of `0C9` proves nothing by itself. The raw frames are always kept, one JSON line
+  each, in `sessions/<name>/watches/NNN.jsonl` (with `NNN.json` for the summary), so a better decoder can be run on
+  them later. The result shows RPM over time and an inventory of the CAN IDs heard. Raw mode needs a CAN vehicle.
+- **Poll RPM.** Asks the official `010C` (engine RPM) every cycle and the adapter's own voltage (`ATRV`) every 4th
+  cycle. The RPM is labelled `010C (official)`. It samples slower than raw mode, but it is the PCM's own answer.
+
+Default length is 20 s, maximum 120 s. **Stop** ends the watch and keeps what was recorded; **Cancel** throws it
+away and saves nothing. A watch that records nothing (for example the key is off, "The vehicle did not answer")
+saves nothing. If the stream goes quiet for 1 s the watch ends early as "silent", and keeps what it has. If the
+adapter browns out or resets mid-crank (common while cranking), what was recorded is kept, a note says so, and the
+next read re-runs the adapter setup. The simulator can run both modes; simulated watches are flagged `sim`, and a
+case holds real or simulated OBD data, never both (watches included).
+
+**Watch OBD during capture.** The Arm panel (laptop and phone) has this checkbox; the laptop also picks the mode
+(the phone uses Raw CAN). The watch starts first and the scope is armed only once it is recording; only then does
+the page say "Crank the engine now." The watch ends 2 s after the capture's recording time ends (or when a capture
+that never triggered ends); a cancelled capture keeps its watch. The two are cross-referenced in the case: the
+capture lists its watch and the watch its capture, with the trigger time. If the watch cannot start, the capture
+runs anyway and the page says why.
+
+**MCP.** Read tools: `watch_progress` (state, whether it is recording, seconds, frame counts, latest and highest
+RPM), `list_watches` and `get_watch` (metadata, summary, ID inventory and a downsampled engine-speed series). With
+"Allow AI control": `obd_watch` (mode, seconds, label), `obd_watch_stop`, `obd_watch_cancel`, and
+`arm_capture(watch=true, watch_mode=...)`. After `obd_watch` the assistant waits for `monitoring: true` in
+`watch_progress` before asking you to crank.
+
+**OBDLink MX+ caveat.** On the owner's Mac the MX+ answers only the first open of its serial port after Bluetooth
+pairing. If the adapter stops answering, forget it in Bluetooth settings and pair it again, then press **Relink** in
+the app first. Do not open the port with any other tool (a terminal, a serial monitor) in between: it would use up
+the one open. Not checked against a real adapter or PCM yet (#3).
+
 ### AI access (MCP)
 
 While the app runs it also serves an MCP endpoint on this computer only (`http://127.0.0.1:8765/mcp`; set
@@ -154,10 +197,10 @@ password.
 **Always available (read and analyze):** `list_sessions`, `get_status`, `get_case_summary`, `get_case_report`,
 `list_captures`, `get_capture_analysis` (ranked findings with evidence), `get_capture_signal` (a downsampled
 window of one channel; runts survive the downsampling), `compare_captures`, `reanalyze_capture` (a what-if with
-different thresholds; nothing is saved), `get_capture_progress`, `obd_progress`, `get_obd_log`.
+different thresholds; nothing is saved), `get_capture_progress`, `obd_progress`, `get_obd_log`, `watch_progress`, `list_watches`, `get_watch`.
 
 **Only while "Allow AI control" is on** (it is off every time the app starts): `arm_capture`, `cancel_capture`,
-`obd_connect`, `obd_disconnect`, `obd_relink`, `obd_read`, `obd_stop`, `obd_cancel`, `add_case_note` and
+`obd_connect`, `obd_disconnect`, `obd_relink`, `obd_read`, `obd_stop`, `obd_cancel`, `obd_watch`, `obd_watch_stop`, `obd_watch_cancel`, `add_case_note` and
 `set_suspect`. They act on the laptop's current session, mode, scenario and settings. Arming only arms: in
 Real-scope mode the assistant is told to ask you to crank. OBD reads keep every existing limit (read-only
 requests, never clears codes, real and simulated reads never mix in one case).
