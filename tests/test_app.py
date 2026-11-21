@@ -350,14 +350,6 @@ def test_change_entry_can_name_its_before_and_after_captures(at):
     assert ev.refs == {"before": ids[0], "after": ids[1]}
 
 
-def test_create_session_makes_it_the_active_one(at):
-    at.sidebar.text_input(key="new_session").set_value("fresh").run()
-    at.sidebar.button(key="create_session").click().run()
-    assert not at.exception
-    assert at.session_state["session_name"] == "fresh"
-    assert at.sidebar.selectbox(key="session_pick").value == "fresh"
-
-
 def _waiting_read(monkeypatch, after=0):
     """Make the next OBD read wait once `after` commands were sent. Returns the event that lets it go on.
     after=0 waits before the PCM has answered anything; after=11 waits right after the first 0100 answer."""
@@ -437,9 +429,44 @@ def test_a_finished_read_is_not_shown_on_another_session(at):
     assert any("Recorded in the case" in s.value for s in at.success)
     get_controller().store.open("other")
     at.run()
-    at.sidebar.selectbox(key="session_pick").select("other").run()
+    at.segmented_control(key="session_pick").set_value("other").run()
     assert not at.exception
     assert not any("Recorded in the case" in s.value for s in at.success)
+
+
+def test_sessions_are_tabs_with_a_plus_at_the_end(at):
+    get_controller().store.open("other")
+    at.run()
+    tabs = at.segmented_control(key="session_pick")
+    assert tabs.options[-1] == "＋" and "other" in tabs.options
+    assert tabs.value == at.session_state["session_name"]
+
+
+def test_plus_tab_creates_and_selects_a_new_session(at):
+    at.segmented_control(key="session_pick").set_value("＋").run()
+    assert at.session_state["session_name"] != "＋"      # still the previous real session
+    at.text_input(key="new_session").set_value("fresh").run()
+    at.button(key="create_session").click().run()
+    assert not at.exception
+    assert at.session_state["session_name"] == "fresh"
+    assert at.segmented_control(key="session_pick").value == "fresh"
+    assert "fresh" in get_controller().store.list_sessions()
+
+
+def test_plus_tab_shows_the_name_field_only_when_selected(at):
+    assert not [t for t in at.text_input if t.key == "new_session"]
+    at.segmented_control(key="session_pick").set_value("＋").run()
+    assert at.text_input(key="new_session")
+    assert not [t for t in at.sidebar.text_input if t.key == "new_session"]
+
+
+def test_plus_tab_rejects_a_bad_name_and_stays_on_plus(at):
+    before = at.session_state["session_name"]
+    at.segmented_control(key="session_pick").set_value("＋").run()
+    at.text_input(key="new_session").set_value("   ").run()
+    at.button(key="create_session").click().run()
+    assert not at.exception
+    assert at.session_state["session_name"] == before
 
 
 @pytest.fixture
@@ -514,3 +541,86 @@ def test_the_log_page_tails_the_log_and_can_hide_heartbeats(at_conn):
     assert "hb >> ATRV" in " ".join(c.value for c in at_conn.code)
     at_conn.toggle(key="log_pause").set_value(True).run()
     assert not at_conn.exception
+
+
+def _delete_buttons(at):
+    return [b for b in at.button if b.key in ("delete_session", "delete_confirm", "delete_cancel")]
+
+
+def test_delete_asks_first_and_cancel_keeps_the_session(at):
+    get_controller().store.open("other")
+    at.run()
+    at.segmented_control(key="session_pick").set_value("other").run()
+    at.button(key="delete_session").click().run()
+    assert any("other" in w.value and "can't be undone" in w.value for w in at.warning)
+    at.button(key="delete_cancel").click().run()
+    assert not at.exception and "other" in get_controller().store.list_sessions()
+    assert not [b for b in at.button if b.key == "delete_confirm"]
+
+
+def test_confirmed_delete_removes_the_session_and_selects_another(at):
+    get_controller().store.open("other")
+    at.run()
+    at.segmented_control(key="session_pick").set_value("other").run()
+    at.button(key="delete_session").click().run()
+    at.button(key="delete_confirm").click().run()
+    assert not at.exception
+    assert "other" not in get_controller().store.list_sessions()
+    assert at.session_state["session_name"] != "other"
+    assert "other" not in at.segmented_control(key="session_pick").options
+    assert at.segmented_control(key="session_pick").value == at.session_state["session_name"]
+
+
+def test_switching_tabs_drops_a_pending_delete_confirmation(at):
+    get_controller().store.open("other")
+    at.run()
+    at.segmented_control(key="session_pick").set_value("other").run()
+    at.button(key="delete_session").click().run()
+    at.segmented_control(key="session_pick").set_value("default").run()
+    assert not [b for b in at.button if b.key == "delete_confirm"]
+
+
+def test_delete_is_hidden_on_the_plus_tab(at):
+    at.segmented_control(key="session_pick").set_value("＋").run()
+    assert not [b for b in at.button if b.key == "delete_session"]
+
+
+def test_delete_is_refused_with_a_message_while_a_read_runs(at, monkeypatch):
+    gate = _waiting_read(monkeypatch)
+    try:
+        at.button(key="obd_read").click().run()
+        at.button(key="delete_session").click().run()
+        at.button(key="delete_confirm").click().run()
+        assert not at.exception
+        assert any("running" in e.value for e in at.error)
+        assert at.session_state["session_name"] in get_controller().store.list_sessions()
+    finally:
+        gate.set()
+
+
+def test_remote_url_is_none_without_a_network_address():
+    import remote
+    assert remote.remote_url("192.168.1.5", 8501) == "http://192.168.1.5:8501/?page=remote"
+    assert remote.remote_url("localhost", 8501) is None
+
+
+def test_qr_svg_is_an_svg_and_depends_on_the_url():
+    import remote
+    a = remote.qr_svg("http://192.168.1.5:8501/?page=remote")
+    assert a.lstrip().startswith("<svg") and "</svg>" in a
+    assert a != remote.qr_svg("http://192.168.1.6:8501/?page=remote")
+
+
+def test_sidebar_offers_a_qr_code_for_the_phone_remote(at, monkeypatch):
+    monkeypatch.setattr("crank.controller.lan_ip", lambda: "192.168.1.5")
+    at.run()
+    assert not at.exception
+    assert any("QR code" in e.label for e in at.sidebar.expander)
+    assert any("192.168.1.5" in c.value for c in at.sidebar.code)
+
+
+def test_sidebar_has_no_qr_code_without_a_network_address(at, monkeypatch):
+    monkeypatch.setattr("crank.controller.lan_ip", lambda: "localhost")
+    at.run()
+    assert not at.exception
+    assert not any("QR code" in e.label for e in at.sidebar.expander)

@@ -91,3 +91,27 @@ def test_snapshot_reports_a_failed_case_hook(c):
     c.arm("x")
     c.job.hook_error = "RuntimeError: log full"
     assert c.snapshot()["hook_error"] == "RuntimeError: log full"
+
+
+def test_delete_session_moves_off_it_first_so_it_is_not_recreated(c):
+    c.store.open("keep"); c.store.open("drop")
+    c.sync(session_name="drop")
+    assert c.delete_session("drop") is None
+    assert c.store.list_sessions() == ["keep"] and c.session_name == "keep"
+    c.traffic.event("a late log line")                    # would recreate sessions/drop if still current
+    assert c.store.list_sessions() == ["keep"]
+
+
+def test_delete_the_only_session_leaves_a_fresh_default(c):
+    c.sync(session_name="only"); c.store.open("only")
+    assert c.delete_session("only") is None
+    assert c.store.list_sessions() == ["default"] and c.session_name == "default"
+
+
+def test_delete_session_is_refused_while_a_capture_runs_on_it(c):
+    c.sync(mode="Simulator", scenario="healthy", session_name="bench")
+    assert c.arm("x") is None
+    msg = c.delete_session("bench")
+    assert msg and "running" in msg and "bench" in c.store.list_sessions()
+    c.job.join(10)
+    assert c.delete_session("bench") is None

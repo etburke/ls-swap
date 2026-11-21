@@ -473,3 +473,15 @@ def test_a_log_that_cannot_be_written_does_not_break_a_read(tmp_path):
     r, err = c.read_obd("healthy")
     assert err is None and r.live
     assert c.connection_status()["traffic_error"]
+
+
+def test_delete_session_is_refused_while_a_read_runs_on_it_but_not_on_another(tmp_path):
+    c = Controller(SessionStore(tmp_path))
+    ev = threading.Event()
+    c._obd_transport = lambda source: Gated("healthy", ev)
+    c.store.open("other")
+    assert c.start_obd("x") is None                         # runs on "default"
+    assert c.delete_session("default") is not None and "default" in c.store.list_sessions()
+    assert c.delete_session("other") is None
+    ev.set()
+    c.obd_job.join(10)

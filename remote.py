@@ -2,12 +2,22 @@
 import os
 import time
 
+import segno
 import streamlit as st
 
 ICON = {"fail": "🔴", "warn": "🟠", "info": "🟢"}
 BIG_BUTTONS = """<style>
 div.stButton > button { height: 5rem; font-size: 1.6rem; }
 </style>"""
+
+
+def remote_url(ip: str, port) -> str | None:
+    """Where a phone on the same network opens the remote; None when there is no network address to give it."""
+    return None if ip == "localhost" else f"http://{ip}:{port}/?page=remote"
+
+
+def qr_svg(url: str) -> str:
+    return segno.make(url, error="m").svg_inline(scale=6, border=2, dark="#000", light="#fff")
 
 
 def render(ctrl):

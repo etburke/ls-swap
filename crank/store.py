@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import time
 from pathlib import Path
 
@@ -91,3 +92,10 @@ class SessionStore:
     def open(self, name: str) -> Session:
         """Create the session if it does not exist."""
         return Session(self.root / _safe(name))
+
+    def delete_session(self, name: str) -> None:
+        """Remove a session folder and everything in it. KeyError if there is no such session."""
+        path = self.root / _safe(name)
+        if not path.is_dir():
+            raise KeyError(name)
+        shutil.rmtree(path)
