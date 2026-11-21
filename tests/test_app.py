@@ -663,3 +663,79 @@ def test_a_busy_mcp_port_is_shown_not_fatal(tmp_path, monkeypatch):
         assert not app.exception
         assert any("MCP server is not running" in w.value for w in app.sidebar.warning)
     reset_controller()
+
+
+def _finish_watch(ctrl):
+    job = ctrl.watch_job
+    if job and job.running:
+        job.stop()
+    if job:
+        job.join(10)
+
+
+def test_watch_panel_runs_a_sim_watch_and_shows_the_summary(at_conn):
+    ctrl = get_controller()
+    try:
+        assert ctrl.connect("cranking_rpm_seen") is None
+        at_conn.run()
+        at_conn.number_input(key="obd_watch_seconds").set_value(2).run()
+        at_conn.button(key="obd_watch_start").click().run()
+        assert not at_conn.exception
+        assert any("Watching" in i.value and "best-effort" in i.value for i in at_conn.info)
+        ctrl.watch_job.join(10)
+        at_conn.run()
+        assert not at_conn.exception
+        assert any("OBD watch" in m.value and "best-effort" in m.value for m in at_conn.success)
+        assert at_conn.dataframe
+        assert any("Seconds from the start of recording" in c.value for c in at_conn.caption)
+    finally:
+        _finish_watch(ctrl)
+
+
+def test_watch_panel_disabled_without_connection(at_conn):
+    assert at_conn.button(key="obd_watch_start").disabled
+    assert any("Connect to the adapter first." in c.value for c in at_conn.caption)
+
+
+def test_arm_with_watch_checkbox_links_a_watch(at_conn):
+    ctrl = get_controller()
+    try:
+        assert ctrl.connect("cranking_rpm_seen") is None
+        at_conn.sidebar.radio(key="page").set_value("Capture").run()
+        at_conn.checkbox(key="arm_watch").check().run()
+        at_conn.button(key="arm").click().run()
+        assert not at_conn.exception
+        ctrl.job.join(20)
+        _finish_watch(ctrl)
+        assert ctrl.snapshot()["state"] == "done"
+        ev = [e for e in ctrl.case().events() if e.type == "watch"]
+        assert ev and ev[0].data.get("capture_id") == ctrl.job.saved_id
+    finally:
+        if ctrl.job:
+            ctrl.job.cancel(); ctrl.job.join(10)
+        _finish_watch(ctrl)
+
+
+def test_remote_page_shows_preparing_message_not_crank_prompt(at_conn, monkeypatch):
+    ctrl = get_controller()
+    gate = threading.Event()
+    monkeypatch.setattr(type(ctrl), "_start_linked_watch", lambda *a, **k: (gate.wait(10), None)[1])
+    try:
+        assert ctrl.arm("x", watch=True) is None
+        deadline = time.time() + 5
+        while time.time() < deadline and ctrl.snapshot()["state"] != "preparing":
+            time.sleep(0.02)
+        at_conn.query_params["page"] = "remote"
+        at_conn.run()
+        assert any("Starting the OBD watch" in i.value for i in at_conn.info)
+        assert not any("crank the engine now" in w.value for w in at_conn.warning)
+    finally:
+        gate.set()
+        ctrl.job.cancel(); ctrl.job.join(10)
+
+
+def test_remote_page_has_watch_checkbox_and_panel(at_conn):
+    at_conn.query_params["page"] = "remote"
+    at_conn.run()
+    assert at_conn.checkbox(key="remote_arm_watch") is not None
+    assert at_conn.button(key="remote_watch_start").disabled

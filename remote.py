@@ -32,9 +32,10 @@ def render(ctrl):
         connection_panel(ctrl, "remote_obd")
 
     label = st.text_input("What changed? (label)", key="remote_label")
+    watch = st.checkbox("Watch OBD during capture", key="remote_arm_watch", disabled=snap["running"])
     if st.button("ARM", key="remote_arm", type="primary", use_container_width=True,
                  disabled=snap["running"]):
-        err = ctrl.arm(label)
+        err = ctrl.arm(label, watch=watch)
         if err:
             st.error(err)
         else:
@@ -51,7 +52,9 @@ def render(ctrl):
                 except ValueError as e:
                     st.error(str(e))
 
-    from case_ui import obd_panel, pick_obd_source
+    from case_ui import obd_panel, pick_obd_source, watch_panel
+    with st.expander("Watch OBD"):
+        watch_panel(ctrl, "remote_watch", compact=True)
     with st.expander("Read OBD"):
         if ctrl.connection_status()["state"] == "connected":
             st.caption("Using the open connection.")
@@ -61,8 +64,12 @@ def render(ctrl):
         obd_panel(ctrl, source, "remote_obd", "Read OBD", full_width=True)
 
     state = snap["state"]
+    if snap["watch_note"]:
+        st.warning(f"The OBD watch did not start (the capture runs anyway): {snap['watch_note']}")
     if snap["running"]:
-        if state in ("armed", "triggered"):
+        if state == "preparing":
+            st.info(snap["message"])
+        elif state in ("armed", "triggered"):
             st.warning(f"**ARMED: crank the engine now.**\n\n{state}, "
                        f"{snap['seconds_left']:.0f} s left to trigger")
         else:

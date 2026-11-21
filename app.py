@@ -189,8 +189,16 @@ def page_capture():
     label = st.text_input("Capture label (what changed?)", key="cap_label")
     note = st.text_input("Note", key="cap_note")
 
+    watch = st.checkbox("Watch OBD during capture", key="arm_watch", disabled=busy,
+                        help="Records the PCM on the open OBD connection, linked to this capture.")
+    watch_mode = "raw"
+    if watch:
+        from case_ui import WATCH_MODES
+        watch_mode = WATCH_MODES[st.selectbox("Watch mode", list(WATCH_MODES), key="arm_watch_mode",
+                                              disabled=busy)]
+
     if st.button("Arm", key="arm", type="primary", disabled=busy):
-        err = ctrl.arm(label, note)
+        err = ctrl.arm(label, note, watch=watch, watch_mode=watch_mode)
         if err:
             st.error(err)
             return
@@ -200,8 +208,13 @@ def page_capture():
     job = ss.job
     if job is None:
         return
+    note_text = ctrl.snapshot()["watch_note"]
+    if note_text:
+        st.warning(f"The OBD watch did not start (the capture runs anyway): {note_text}")
     if job.running:
-        if job.state in ("armed", "triggered"):
+        if job.state == "preparing":
+            st.info(job.message)
+        elif job.state in ("armed", "triggered"):
             st.warning(f"**ARMED: crank the engine now.**  Waiting {job.seconds_left:.0f} s more. "
                        f"State: {job.state}")
         else:
