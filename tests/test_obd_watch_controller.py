@@ -249,6 +249,7 @@ def test_linked_watch_and_capture_cross_reference(tmp_path, monkeypatch):
     c = linked(tmp_path / "a")
     assert c.arm("first", watch=True) is None
     cap, watch = finish_capture(c), finish(c)
+    assert cap.saved_id, (cap.state, cap.message, cap.hook_error, watch.state, watch.message)
     evs = _cross_referenced(c, cap, watch)
     assert evs["capture"].refs == {"capture": cap.saved_id}
     assert evs["watch"].refs == {"watch": watch.meta["id"], "capture": cap.saved_id}
@@ -265,6 +266,7 @@ def test_linked_watch_and_capture_cross_reference(tmp_path, monkeypatch):
     monkeypatch.setattr(SimScope, "fetch", slow_fetch)
     assert c.arm("second", watch=True) is None
     cap, watch = finish_capture(c), finish(c)
+    assert cap.saved_id, (cap.state, cap.message, cap.hook_error, watch.state, watch.message)
     evs = _cross_referenced(c, cap, watch)
     assert evs["watch"].refs == {"watch": watch.meta["id"]}
     assert evs["capture"].refs == {"capture": cap.saved_id, "watch": watch.meta["id"]}
