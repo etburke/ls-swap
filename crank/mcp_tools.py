@@ -146,9 +146,11 @@ class Tools:
         if job is None:
             return {"state": "idle", "running": False, "monitoring": False}
         return {"state": job.state, "running": job.running, "monitoring": job.monitoring.is_set(),
-                "seconds": round(job.seconds, 1), "lines": job.lines, "frames": job.frames,
-                "latest_rpm": job.latest_rpm, "max_rpm": job.max_rpm, "session": job.session_name,
-                "message": job.message}
+                "mode": job.mode, "seconds": round(job.seconds, 1), "lines": job.lines, "frames": job.frames,
+                "latest_rpm": job.latest_rpm, "max_rpm": job.max_rpm, "rpm_source": self._RPM_SOURCE[job.mode],
+                "session": job.session_name, "message": job.message}
+
+    _RPM_SOURCE = {"raw": "decoded from raw CAN frames (best-effort, ID 0C9)", "poll": "010C (official)"}
 
     @staticmethod
     def _rpm_series(meta: dict, rows: list[dict]) -> tuple[list[tuple[float, float]], str]:
@@ -184,7 +186,8 @@ class Tools:
 
     def watch_progress(self) -> dict[str, Any]:
         """The current or last OBD watch: state, whether it is recording (monitoring), seconds, line and frame
-        counts, the latest and highest RPM seen, and any message. Poll this after obd_watch."""
+        counts, the latest and highest RPM seen with its rpm_source (raw mode: best-effort decodes of CAN ID 0C9;
+        poll mode: official 010C), and any message. Poll this after obd_watch."""
         return jsonable(self._watch_state())
 
     def get_obd_log(self, lines: int = 100, session: str | None = None) -> dict[str, Any]:
@@ -434,7 +437,9 @@ class Tools:
     def obd_disconnect(self) -> dict[str, Any]:
         """Close the held adapter connection."""
         self._gate()
-        self.ctrl.disconnect()
+        err = self.ctrl.disconnect()
+        if err:
+            raise ToolError(err)
         return jsonable(self.ctrl.connection_status())
 
     def obd_relink(self) -> dict[str, Any]:

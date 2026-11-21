@@ -40,7 +40,7 @@ def connection_panel(ctrl, key: str) -> None:
         st.caption(vehicle_line(s))
         if s.get("traffic_error"):
             st.warning(f"The log could not be written: {s['traffic_error']}")
-        busy = s["reading"]
+        busy = s["reading"] or s.get("watching", False)
         up = s["state"] == "connected"
         source = None if up else pick_obd_source(f"{key}_src")
         c1, c2, c3 = st.columns(3)
@@ -52,8 +52,11 @@ def connection_panel(ctrl, key: str) -> None:
             st.rerun()
         if c2.button("Disconnect", key=f"{key}_disconnect",
                      disabled=(not up and s["state"] != "dropped") or busy, use_container_width=True):
-            ctrl.disconnect()
-            st.rerun()
+            err = ctrl.disconnect()
+            if err:
+                st.error(err)                       # a read or watch holds the adapter: say so, do not rerun it away
+            else:
+                st.rerun()
         if c3.button("Relink", key=f"{key}_relink", disabled=busy or not s["source"], use_container_width=True):
             err = ctrl.relink()
             if err:

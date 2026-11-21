@@ -518,11 +518,18 @@ def test_watch_progress_idle_and_running(ctrl, tools):
         p = tools.watch_progress()
         assert p["running"] is True and p["monitoring"] is True and p["session"] == "bench"
         assert {"state", "seconds", "lines", "frames", "latest_rpm", "max_rpm", "message"} <= set(p)
+        assert p["mode"] == "raw" and p["rpm_source"] == "decoded from raw CAN frames (best-effort, ID 0C9)"
+        with pytest.raises(ToolError, match="An OBD watch is running"):
+            tools.obd_disconnect()
         tools.obd_watch_stop()
         finish_watch(ctrl)
         p = tools.watch_progress()
         assert p["running"] is False and p["state"] == "stopped" and p["lines"] > 0
         json.dumps(p, allow_nan=False)
+        tools.obd_watch("poll", 1)
+        finish_watch(ctrl)
+        p = tools.watch_progress()
+        assert p["mode"] == "poll" and p["rpm_source"] == "010C (official)"
     finally:
         tools.obd_disconnect()
 

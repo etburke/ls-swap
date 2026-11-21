@@ -163,7 +163,7 @@ def _watch_results(ctrl, job) -> None:
     t0 = meta.get("started") or 0.0
     if meta["mode"] == "poll":
         points = [(r["t"] - t0, r["value"]) for r in rows if r.get("cmd") == "010C" and r.get("value") is not None]
-        name = "RPM (010C, official)"
+        name = "RPM, 010C (official)"
     else:
         points = [(r["t"] - t0, d["value"]) for r in rows for d in r.get("decoded", [])
                   if d["name"] == "Engine speed"]
@@ -205,9 +205,16 @@ def watch_panel(ctrl, key: str, compact: bool = False) -> None:
     if job is None or job.session_name != ctrl.session_name:
         return
     if job.running:
-        rpm = "" if job.latest_rpm is None else f" · latest engine speed {job.latest_rpm:,.0f} rpm (best-effort)"
-        st.info(f"Watching… {job.seconds:.0f} s · {job.frames} frames{rpm}")
-        if job.monitoring.is_set():
+        if job.mode == "poll":
+            count = f"{job.lines} lines"
+            rpm = "" if job.latest_rpm is None else f" · latest RPM 010C (official) {job.latest_rpm:,.0f} rpm"
+        else:
+            count = f"{job.frames} frames"
+            rpm = "" if job.latest_rpm is None else f" · latest engine speed {job.latest_rpm:,.0f} rpm (best-effort)"
+        st.info(f"Watching… {job.seconds:.0f} s · {count}{rpm}")
+        if job.linked:                               # monitoring starts before the scope is even configured
+            st.info("Linked to the capture: crank when the capture says Armed")
+        elif job.monitoring.is_set():
             st.warning("**Recording — crank now**")
         c1, c2 = st.columns(2)
         if c1.button("Stop (keep)", key=f"{key}_stop", use_container_width=True):
