@@ -267,3 +267,34 @@ def test_reading_never_sees_a_half_written_line(tmp_path):
         case.events()
         assert case.skipped == 0
     t.join()
+
+
+def test_event_source_defaults_empty_and_is_left_out_of_the_json(case):
+    ev = case.append("observation", "plain")
+    assert ev.source == ""
+    assert "source" not in json.loads(ev.to_json())
+    line = (case.path / "events.jsonl").read_text().strip().splitlines()[-1]
+    assert "source" not in json.loads(line)
+
+
+def test_event_source_round_trips(case):
+    ev = case.append("observation", "from the assistant", source="mcp")
+    assert ev.source == "mcp"
+    assert json.loads(ev.to_json())["source"] == "mcp"
+    assert case.events()[-1].source == "mcp"
+
+
+def test_old_logs_without_source_load_unchanged(case):
+    with open(case.path / "events.jsonl", "w") as f:
+        f.write('{"id":"e0001","ts":"2026-10-11T10:00:00","type":"symptom","text":"old","data":{},"refs":{}}\n')
+    assert [(e.text, e.source) for e in case.events()] == [("old", "")]
+
+
+def test_event_source_must_be_text():
+    with pytest.raises(ValueError, match="source"):
+        Event.from_dict({"id": "e1", "ts": "t", "type": "symptom", "source": 5})
+
+
+def test_set_hypothesis_records_the_source(case):
+    ev = case.set_hypothesis(None, "Bad PCM", source="mcp")
+    assert ev.source == "mcp" and case.hypotheses()["h1"].source == "mcp"

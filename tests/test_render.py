@@ -112,3 +112,24 @@ def test_vehicle_only_case_has_a_timeline_placeholder(tmp_path):
     s = build_summary(case)
     assert "- nothing recorded yet" in to_markdown(s)
     assert "nothing recorded yet" in to_html(s)
+
+
+def test_ai_entries_are_marked_in_markdown_and_html(tmp_path):
+    case = Case(SessionStore(tmp_path).open("c"))
+    case.set_vehicle(Vehicle(make="Toyota"))
+    case.append("observation", "Owner saw a spark")
+    case.append("observation", "Assistant noted fuel smell", source="mcp")
+    case.set_hypothesis(None, "Bad ground strap", source="mcp")
+    s = build_summary(case)
+    assert [t["source"] for t in s.timeline] == ["", "mcp", "mcp"]
+    md, html = to_markdown(s), to_html(s)
+    assert "[AI] Noted: Assistant noted fuel smell" in md
+    assert "Noted: Owner saw a spark" in md and "[AI] Noted: Owner" not in md
+    assert "- [AI] Bad ground strap" in md
+    assert "added by an AI assistant" in md and "added by an AI assistant" in html
+    assert "[AI]" in html
+
+
+def test_a_case_with_no_ai_entries_has_no_ai_note(full_case):
+    assert "AI assistant" not in to_markdown(build_summary(full_case))
+    assert "AI assistant" not in to_html(build_summary(full_case))

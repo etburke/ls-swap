@@ -35,10 +35,13 @@ class Event:
     data: dict = field(default_factory=dict)
     refs: dict = field(default_factory=dict)
     synth: bool = False            # synthesized from legacy files; never written to disk
+    source: str = ""               # who added it: "" for the owner, "mcp" for an AI assistant
 
     def to_json(self) -> str:
         d = asdict(self)
         d.pop("synth")
+        if not d["source"]:
+            d.pop("source")                                  # owner entries and old logs stay byte-identical
         return json.dumps(d, separators=(",", ":"))
 
     @classmethod
@@ -53,6 +56,8 @@ class Event:
         for k in ("data", "refs"):
             if k in d and not isinstance(d[k], dict):
                 raise ValueError(f"event field {k} must be an object")
+        if not isinstance(d.get("source", ""), str):
+            raise ValueError("event source must be text")
         return cls(**d)
 
 
@@ -173,14 +178,14 @@ class Case:
         return events
 
     def append(self, type_: str, text: str = "", data: dict | None = None,
-               refs: dict | None = None) -> Event:
+               refs: dict | None = None, source: str = "") -> Event:
         data, refs = dict(data or {}), dict(refs or {})
         _validate(type_, text, data)
         with _lock:                               # id assignment and the write are one step
             existing, _ = load_events(self._events_path)
             nums = [int(e.id[1:]) for e in existing if e.id[:1] == "e" and e.id[1:].isdigit()]
             ev = Event(f"e{(max(nums) + 1) if nums else 1:04d}", time.strftime("%Y-%m-%dT%H:%M:%S"),
-                       type_, text.strip(), data, refs)
+                       type_, text.strip(), data, refs, source=source)
             lead = ""
             try:
                 with open(self._events_path, "rb") as f:          # a crash can leave a partial last line
@@ -242,13 +247,13 @@ class Case:
         return latest
 
     def set_hypothesis(self, hid: str | None, title: str, status: str = "open",
-                       reason: str = "", refs: dict | None = None) -> Event:
+                       reason: str = "", refs: dict | None = None, source: str = "") -> Event:
         with _lock:                                        # allocate the id and write as one step
             if not hid:
                 nums = [int(h[1:]) for h in self.hypotheses() if h[:1] == "h" and h[1:].isdigit()]
                 hid = f"h{(max(nums) + 1) if nums else 1}"
             return self.append("hypothesis", "", {"hid": hid, "title": title, "status": status,
-                                                  "reason": reason}, refs)
+                                                  "reason": reason}, refs, source)
 
     # -- everything, including legacy files read as events
     def all_events(self) -> list[Event]:

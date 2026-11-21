@@ -89,11 +89,14 @@ def build_summary(case: Case) -> Summary:
     s = Summary(case.name, case.vehicle(), skipped_lines=case.skipped)
 
     s.symptoms = [{"ts": e.ts, "text": e.text} for e in reversed(events) if e.type == "symptom"]
-    s.timeline = [{"ts": e.ts, "type": e.type, "line": describe(e), "synth": e.synth} for e in events]
+    s.timeline = [{"ts": e.ts, "type": e.type, "line": describe(e), "synth": e.synth, "source": e.source}
+                  for e in events]
 
     for e in case.hypotheses().values():
         row = {"title": e.data.get("title", ""), "reason": e.data.get("reason", ""),
                "evidence": _evidence(e.refs)}
+        if e.source:
+            row["source"] = e.source                      # absent for the owner's own entries
         {"ruled_out": s.ruled_out, "confirmed": s.confirmed}.get(e.data.get("status", "open"), s.open).append(row)
 
     latest: dict[tuple, Event] = {}
