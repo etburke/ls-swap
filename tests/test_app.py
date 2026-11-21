@@ -27,10 +27,8 @@ def at(tmp_path, monkeypatch):
 def _arm_and_finish(at):
     at.sidebar.radio(key="page").set_value("Capture").run()
     at.button(key="arm").click().run()
-    for _ in range(10):
-        if at.session_state["job"].state in ("done", "error"):
-            break
-        at.run()
+    get_controller().job.join(30)                         # the page renders once per run (refresh off in tests)
+    at.run()
     return at.session_state["job"]
 
 
@@ -150,6 +148,19 @@ def test_remote_shows_cancel_while_running(at):
     try:
         assert r.button(key="remote_cancel") is not None
         assert r.button(key="remote_arm").disabled
+    finally:
+        get_controller().cancel()
+        get_controller().job.join(5)
+
+
+def test_capture_page_renders_once_while_armed_when_refresh_is_off(at):
+    get_controller().sim_fault = "stuck_waiting"
+    at.sidebar.radio(key="page").set_value("Capture").run()
+    try:
+        t0 = time.monotonic()
+        at.button(key="arm").click().run(timeout=5)
+        assert not at.exception and time.monotonic() - t0 < 3
+        assert any("ARMED" in w.value for w in at.warning) and at.button(key="cancel") is not None
     finally:
         get_controller().cancel()
         get_controller().job.join(5)
@@ -375,6 +386,9 @@ def test_case_page_shows_a_running_read_and_cancel_records_nothing(at, monkeypat
         at.run()                                           # the next poll: the button is drawn disabled
         assert at.button(key="obd_read").disabled
         at.button(key="obd_read_cancel").click().run()
+        get_controller().obd_job.join(5)                  # page-independent: the cancel has finished
+        assert not get_controller().obd_job.running
+        at.run()
         assert any("Read cancelled; nothing was recorded." in w.value for w in at.warning)
         assert get_controller().case().events() == []
         at.run()
@@ -732,6 +746,44 @@ def test_remote_page_shows_preparing_message_not_crank_prompt(at_conn, monkeypat
     finally:
         gate.set()
         ctrl.job.cancel(); ctrl.job.join(10)
+
+
+def test_a_capture_linked_watch_points_at_the_capture_not_a_crank_prompt(at_conn):
+    ctrl = get_controller()
+    ctrl.sim_fault = "stuck_waiting"                         # the capture stays armed; its watch keeps running
+    try:
+        assert ctrl.connect("cranking_rpm_seen") is None
+        assert ctrl.arm("x", watch=True) is None
+        deadline = time.time() + 10
+        while time.time() < deadline and not (ctrl.watch_job and ctrl.watch_job.monitoring.is_set()):
+            time.sleep(0.02)
+        assert ctrl.watch_job.linked and ctrl.watch_job.running
+        for page in (None, "remote"):
+            if page:
+                at_conn.query_params["page"] = page
+            at_conn.run()
+            assert not at_conn.exception
+            assert any("Linked to the capture: crank when the capture says Armed" in i.value for i in at_conn.info)
+            assert not any("Recording — crank now" in w.value for w in at_conn.warning)
+    finally:
+        ctrl.job.cancel(); ctrl.job.join(10)
+        _finish_watch(ctrl)
+
+
+def test_a_running_poll_watch_counts_lines_and_says_official(at_conn):
+    ctrl = get_controller()
+    try:
+        assert ctrl.connect("cranking_rpm_seen") is None
+        assert ctrl.start_watch("poll", 20) is None
+        assert ctrl.watch_job.monitoring.wait(5)
+        at_conn.run()
+        assert not at_conn.exception
+        [line] = [i.value for i in at_conn.info if "Watching" in i.value]
+        assert " lines" in line and "frames" not in line and "best-effort" not in line
+        assert "RPM 010C (official)" in line
+        assert any("Recording — crank now" in w.value for w in at_conn.warning)
+    finally:
+        _finish_watch(ctrl)
 
 
 def test_remote_page_has_watch_checkbox_and_panel(at_conn):

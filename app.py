@@ -1,5 +1,6 @@
 """Crank signal test harness UI. Run with:  streamlit run app.py"""
 import dataclasses
+import os
 import time
 
 import streamlit as st
@@ -221,8 +222,10 @@ def page_capture():
             st.info(f"State: {job.state}")
         if st.button("Cancel", key="cancel"):
             ctrl.cancel()
-        time.sleep(0.5)
-        st.rerun()
+        refresh = float(os.environ.get("CRANK_REMOTE_REFRESH_S", "0.5"))   # 0: render once (tests)
+        if refresh > 0:
+            time.sleep(refresh)
+            st.rerun()
     elif job.state == "done":
         st.success("Capture complete and saved.")
         for line in getattr(job.scope, "log", []):

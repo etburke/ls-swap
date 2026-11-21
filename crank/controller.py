@@ -521,10 +521,30 @@ def get_controller() -> Controller:
         return _controller
 
 
-def reset_controller() -> None:
+def reset_controller(join_s: float = 5.0) -> None:
+    """Shut the shared controller down: cancel its capture, read and watch, wait for each (bounded), close the
+    adapter connection and stop the MCP server. Never blocks forever."""
     global _controller
     with _guard:
-        if _controller is not None and _controller.mcp is not None:
-            from .mcp_server import stop_mcp_server           # imported here: mcp_server never imports this module
-            stop_mcp_server(_controller)
-        _controller = None
+        c, _controller = _controller, None
+    if c is None:
+        return
+    for job in (c.job, c.obd_job, c.watch_job):
+        if job is not None:
+            try:
+                if job.running:
+                    job.cancel()
+                job.join(join_s)
+            except Exception:
+                pass
+    try:
+        if c._obd_lock.acquire(timeout=join_s):           # bounded: a stuck job must not hang the shutdown
+            try:
+                c.connection.disconnect()
+            finally:
+                c._obd_lock.release()
+    except Exception:
+        pass
+    if c.mcp is not None:
+        from .mcp_server import stop_mcp_server           # imported here: mcp_server never imports this module
+        stop_mcp_server(c)

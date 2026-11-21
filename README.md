@@ -130,7 +130,7 @@ the read carries on. These four are the only identification commands on the allo
 still refused. Nothing changes behaviour based on what was found yet; later work (`STPTO`, `STPX`) will use it. The
 simulator's `elm_clone` and `flaky_adapter_id` scenarios exercise it. Not yet checked against a real adapter (#3).
 
-**Listen-only monitor commands.** Six more adapter commands are allowed for the planned CAN monitor (OBD watch): `ATMA` (monitor all traffic), `ATCSM1` (the adapter stays silent on the bus, sending no ACKs), `ATCAF0` and `ATCAF1` (CAN automatic formatting off or on), and `ATD0` and `ATD1` (display of the DLC off or on). Monitor mode only listens; `ATCSM1` is what keeps the adapter from transmitting while it does so. The transmit-capable forms (`ATCSM0`, `ATSH`, `STMA`, `ATMT`, ...) stay refused.
+**Listen-only monitor commands.** Six more adapter commands are allowed for the planned CAN monitor (OBD watch): `ATMA` (monitor all traffic), `ATCSM1` (the adapter stays silent on the bus, sending no ACKs), `ATCAF0` and `ATCAF1` (CAN automatic formatting off or on), and `ATD0` and `ATD1` (display of the DLC off or on). Monitor mode only listens; `ATCSM1` is what keeps the adapter from transmitting while it does so. Everything else stays refused: the transmit-capable commands (`ATCSM0`, which lets the adapter ACK on the bus, and `ATSH`, which sets a transmit header) and the other monitor variants that were not reviewed (`ATMT`, `ATMR`, `STMA`, ...). `ATMA` is only sent by the watch's stream, never as an ordinary command.
 
 **When the PCM does not give a value.** A PID the PCM refuses, answers "busy" to, or does not answer never fails the read: the value is left out and the reason is recorded (not in the PCM's support map, refused by the PCM, PCM busy, no answer). A busy reply is retried once, under the same limit as adapter errors. The result lines group the missing values by reason, and the case summary and report print the latest read's notes (retries, resets, adapter gaps) and any values the PCM would not give. If a PID support map cannot be read, the PIDs it covers are tried anyway. Only a failure on the very first supported-PID request, or a busy reply on a trouble-code request, still fails the read. Trouble codes now show separate rows when a code is both stored and permanent. A case holds real OBD reads or simulated ones, never both: reading from the other kind is refused with a message, so practice runs cannot be mistaken for evidence. The simulator's `pid_refused`, `pid_busy_once`, `pid_busy_always`, `pid_no_answer`, `status_refused`, `map_refused`, `pcm_refuses_0100`, `trans_busy_on_pid` and `many_pids_busy` scenarios exercise these. None of this is checked against a real PCM yet (#3).
 
@@ -152,28 +152,31 @@ read-only requests as a read; it never transmits on the bus.
   logs every frame it hears. Decoding is best-effort: the one decoder so far reads engine speed from ID `0C9`
   (bytes 1-2, big-endian, times 0.25 rpm). Every decoded value is marked best-effort and carries its source ID and
   a decoder version (`0C9-engine-speed-v1: bytes[1:3] BE x0.25`), which is saved with the watch. Treat it as a
-  lead, not a measurement; absence of `0C9` proves nothing by itself. The raw frames are always kept, one JSON line
-  each, in `sessions/<name>/watches/NNN.jsonl` (with `NNN.json` for the summary), so a better decoder can be run on
-  them later. The result shows RPM over time and an inventory of the CAN IDs heard. Raw mode needs a CAN vehicle.
+  lead, not a measurement; absence of `0C9` proves nothing by itself. For every saved watch the raw frames are
+  kept, one JSON line each, in `sessions/<name>/watches/NNN.jsonl` (with `NNN.json` for the summary), so a better
+  decoder can be run on them later (a cancelled watch, or one that recorded nothing, saves no file). The result shows RPM over time and an inventory of the CAN IDs heard. Raw mode needs a CAN vehicle.
 - **Poll RPM.** Asks the official `010C` (engine RPM) every cycle and the adapter's own voltage (`ATRV`) every 4th
   cycle. The RPM is labelled `010C (official)`. It samples slower than raw mode, but it is the PCM's own answer.
 
-Default length is 20 s, maximum 120 s. **Stop** ends the watch and keeps what was recorded; **Cancel** throws it
+Length is 1 to 120 s (default 20 s). **Stop** ends the watch and keeps what was recorded; **Cancel** throws it
 away and saves nothing. A watch that records nothing (for example the key is off, "The vehicle did not answer")
-saves nothing. If the stream goes quiet for 1 s the watch ends early as "silent", and keeps what it has. If the
+saves nothing. In raw mode, if the CAN stream goes quiet for 1 s the watch ends early as "silent", and keeps
+what it has (poll mode has no such rule: each `010C` simply waits for its answer). If the
 adapter browns out or resets mid-crank (common while cranking), what was recorded is kept, a note says so, and the
-next read re-runs the adapter setup. The simulator can run both modes; simulated watches are flagged `sim`, and a
+next read re-runs the adapter setup. The same happens after a cancel, an error, or if the adapter's settings
+could not be confirmed restored (every restore command must answer `OK`). The simulator can run both modes; simulated watches are flagged `sim`, and a
 case holds real or simulated OBD data, never both (watches included).
 
 **Watch OBD during capture.** The Arm panel (laptop and phone) has this checkbox; the laptop also picks the mode
 (the phone uses Raw CAN). The watch starts first and the scope is armed only once it is recording; only then does
-the page say "Crank the engine now." The watch ends 2 s after the capture's recording time ends (or when a capture
+the page say "Crank the engine now." (Meanwhile the watch panel says "Linked to the capture: crank when the capture
+says Armed", never its own crank prompt.) The watch ends 2 s after the capture's recording time ends (or when a capture
 that never triggered ends); a cancelled capture keeps its watch. The two are cross-referenced in the case: the
 capture lists its watch and the watch its capture, with the trigger time. If the watch cannot start, the capture
 runs anyway and the page says why.
 
-**MCP.** Read tools: `watch_progress` (state, whether it is recording, seconds, frame counts, latest and highest
-RPM), `list_watches` and `get_watch` (metadata, summary, ID inventory and a downsampled engine-speed series). With
+**MCP.** Read tools: `watch_progress` (state, mode, whether it is recording, seconds, line and frame counts,
+latest and highest RPM with `rpm_source`: best-effort raw decode or official `010C`), `list_watches` and `get_watch` (metadata, summary, ID inventory and a downsampled engine-speed series). With
 "Allow AI control": `obd_watch` (mode, seconds, label), `obd_watch_stop`, `obd_watch_cancel`, and
 `arm_capture(watch=true, watch_mode=...)`. After `obd_watch` the assistant waits for `monitoring: true` in
 `watch_progress` before asking you to crank.
