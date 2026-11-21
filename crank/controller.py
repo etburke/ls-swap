@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import socket
 import threading
+import time
 from pathlib import Path
 
 from .capture import CaptureJob
@@ -16,11 +17,25 @@ from .obd.reader import ObdReader
 from .obd.serial_transport import SerialTransport, resolve_port
 from .obd.trafficlog import LoggingTransport, TrafficLog
 from .obd.transport import HeldTransport, SimTransport
+from .obd.watch import MAX_SECONDS, MODES, WatchJob
 from .scope import RigolScope, SimScope
 from .store import SessionStore
 
 SYNCABLE = ("mode", "scenario", "session_name", "settings", "thresholds")
 _SEVERITY_ORDER = {"fail": 0, "warn": 1, "info": 2}
+LINKED_TAIL_S = 2.0           # a linked watch records this long past the end of the capture's record time
+LINKED_START_S = 25.0         # how long a capture waits for its linked watch to be recording
+
+
+class _CaptureLink:
+    """A capture and its linked watch. Whichever is saved second writes the cross-reference, under `lock`
+    (never the read lock: the watch's saved callback runs while that is held)."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.watch: WatchJob | None = None
+        self.watch_id: str | None = None          # set once the watch is saved
+        self.capture_id: str | None = None        # set once the capture is in the case log
 
 
 class Controller:
@@ -37,6 +52,8 @@ class Controller:
         self._lock = threading.Lock()
         self._obd_lock = threading.Lock()
         self.obd_job: ObdJob | None = None
+        self.watch_job: WatchJob | None = None
+        self._link: _CaptureLink | None = None    # the running capture's linked watch, if it asked for one
         self.ai_control = False                   # set by the sidebar toggle; gates the MCP control tools
         self.mcp = None                           # the running MCP server handle (crank.mcp_server)
         self.traffic = TrafficLog(logs_dir or Path(store.root).parent / "logs", session=self._log_session)
@@ -52,8 +69,11 @@ class Controller:
     def running(self) -> bool:
         return bool(self.job and self.job.running)
 
-    def arm(self, label: str = "", note: str = "") -> str | None:
-        """Start a capture. Returns a message if it could not start, else None."""
+    def arm(self, label: str = "", note: str = "", watch: bool = False, watch_mode: str = "raw") -> str | None:
+        """Start a capture. Returns a message if it could not start, else None.
+
+        With `watch`, an OBD watch is started on the capture's thread and recording before the scope is armed;
+        if it cannot start, the capture runs anyway and the reason is in snapshot()["watch_note"]."""
         with self._lock:
             if self.running:
                 return "A capture is already running."
@@ -65,13 +85,115 @@ class Controller:
                 return "Connect to the scope first (on the laptop)."
             sess = self.store.open(self.session_name)
             case = Case(sess)
+            link = _CaptureLink() if watch else None
+            sim_capture = self.mode == "Simulator"
+
+            def on_done(j: CaptureJob) -> None:
+                sim = bool(j.data and j.data.meta.get("sim"))
+                if link is None:
+                    case.append_capture(j.saved_id, label, j.analysis, sim)
+                    return
+                with link.lock:
+                    link.capture_id = j.saved_id
+                    if link.watch_id:                      # the watch was saved first
+                        link.watch.meta["capture_id"] = j.saved_id
+                        self._write_link(sess, link.watch, j.saved_id)
+                    case.append_capture(j.saved_id, label, j.analysis, sim, watch_id=link.watch_id)
+
+            def before_arm(j: CaptureJob) -> str | None:
+                return self._start_linked_watch(j, link, sess, case, watch_mode, label, sim_capture)
+
             self.job = CaptureJob(
                 scope, self.settings, self.thresholds, poll_s=self.poll_s,
-                save=lambda d: sess.add_capture(d, label, note),
-                on_done=lambda j: case.append_capture(j.saved_id, label, j.analysis,
-                                                      bool(j.data and j.data.meta.get("sim"))))
+                save=lambda d: sess.add_capture(d, label, note), on_done=on_done,
+                before_arm=before_arm if link else None,
+                on_end=(lambda j: self._capture_ended(j, link)) if link else None)
+            self._link = link
             self.job.start()
             return None
+
+    def _start_linked_watch(self, cap: CaptureJob, link: _CaptureLink, sess, case: Case, mode: str, label: str,
+                            sim_capture: bool) -> str | None:
+        """The capture's before_arm hook, on the capture's thread: start the watch and wait until it is recording.
+        Returns why it did not start, else None."""
+        conn = self.connection
+        if conn.state != "connected":
+            return "Connect to the adapter first."
+        if mode not in MODES:
+            return "Mode must be 'raw' or 'poll'."
+        if sim_capture and conn.kind != "simulated":
+            return "A simulated capture is only linked to a simulated watch; the adapter connection is real."
+        if not sim_capture and conn.kind == "simulated":
+            return "A real capture is only linked to a real watch; the adapter connection is simulated."
+        s = cap.settings
+
+        def until() -> bool:
+            if not cap.running:
+                return True
+            t = cap.triggered_at
+            return t is not None and time.time() > t + s.seconds + LINKED_TAIL_S
+
+        job, err = self._start_watch(mode, None, label, sess, until=until, ceiling=s.wait + s.seconds + 10,
+                                     record=lambda w: self._watch_saved(w, cap, link, sess, case))
+        if err:
+            return err
+        link.watch = job
+        deadline = time.monotonic() + LINKED_START_S
+        while not job.monitoring.wait(0.05) and not cap.cancelled:
+            if not job.running:
+                return job.message or "The OBD watch ended before it was recording."
+            if time.monotonic() > deadline:
+                job.cancel()
+                return f"The OBD watch was not recording after {LINKED_START_S:g} s."
+        if cap.cancelled:
+            job.stop()                                     # a capture cancel keeps the watch
+        return None
+
+    @staticmethod
+    def _write_link(sess, job: WatchJob, capture_id: str) -> None:
+        """Write the cross-reference into both metadata files. A disk error is noted in the watch's meta (and
+        so in its case event when that is written later); it never stops the case events being written."""
+        try:
+            sess.link_watch(job.meta["id"], capture_id)
+        except Exception as e:
+            job.meta["notes"].append(f"the link to capture {capture_id} could not be written: "
+                                     f"{type(e).__name__}: {e}")
+            try:
+                job.writer.finish(job.meta)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _did_not_save(cap: CaptureJob) -> str:
+        return f"linked capture did not save: {cap.message}"
+
+    def _watch_saved(self, job: WatchJob, cap: CaptureJob, link: _CaptureLink, sess, case: Case) -> None:
+        """The linked watch's saved callback (watch thread, read lock held: only the link lock is taken here)."""
+        meta = job.meta
+        with link.lock:
+            link.watch_id = meta["id"]
+            meta["trigger_t"] = cap.triggered_at
+            if link.capture_id:                            # the capture was saved first
+                meta["capture_id"] = link.capture_id
+            elif not cap.running and cap.saved_id is None:
+                meta["notes"].append(self._did_not_save(cap))
+            if link.capture_id:
+                self._write_link(sess, job, link.capture_id)
+            try:
+                job.writer.finish(meta)                    # rewrite the meta with the trigger time and notes
+            except Exception as e:
+                meta["notes"].append(f"the watch metadata could not be rewritten: {type(e).__name__}: {e}")
+            case.append_watch(meta)
+
+    def _capture_ended(self, cap: CaptureJob, link: _CaptureLink) -> None:
+        """The capture's on_end hook: a watch saved before the capture failed gets the note in its meta."""
+        with link.lock:
+            job = link.watch
+            if cap.saved_id is None and link.watch_id and job is not None:
+                note = self._did_not_save(cap)
+                if note not in job.meta["notes"]:
+                    job.meta["notes"].append(note)
+                    job.writer.finish(job.meta)
 
     def case(self) -> Case:
         return Case(self.store.open(self.session_name))
@@ -84,11 +206,11 @@ class Controller:
             return SerialTransport(resolve_port(value))
         raise ObdError(f"Unknown OBD source {kind!r}.")
 
-    def _wrong_kind(self, transport) -> str:
-        """'' if this read may go into the current case, else why not. A case holds real OBD reads or
-        simulated ones, never both, so a practice run cannot be mistaken for evidence."""
+    def _wrong_kind(self, transport, case: Case | None = None) -> str:
+        """'' if this read may go into the case (default: the current one), else why not. A case holds real OBD
+        reads or simulated ones, never both, so a practice run cannot be mistaken for evidence."""
         kind = "simulated" if transport.sim else "real"
-        others = self.case().obd_kinds() - {kind}
+        others = (case or self.case()).obd_kinds() - {kind}
         if not others:
             return ""
         have = sorted(others)[0]
@@ -104,6 +226,9 @@ class Controller:
             job = self.obd_job
             if job and job.running and job.session_name == name:
                 return "An OBD read is running on this session; wait for it or cancel it first."
+            watch = self.watch_job
+            if watch and watch.running and watch.session_name == name:
+                return "A watch is running on this session; wait for it or stop it first."
             if name == self.session_name:
                 self.session_name = next((n for n in self.store.list_sessions() if n != name), "default")
             try:
@@ -124,6 +249,13 @@ class Controller:
             return self._obd_lock.acquire(timeout=3.0)
         return False
 
+    WATCHING = "An OBD watch is running; wait for it or stop it first."
+
+    def _busy(self, default: str) -> str:
+        """Why the read lock is taken: a watch, or `default` (a read)."""
+        w = self.watch_job
+        return self.WATCHING if w and w.running else default
+
     DROPPED = ("The adapter connection dropped. Press Relink, or Disconnect to read without a standing "
                "connection.")
 
@@ -134,7 +266,7 @@ class Controller:
 
         The lock is held until the job ends, so a second read from the phone or another tab is refused."""
         if not self._take_obd_lock():
-            return "An OBD read is already running."
+            return self._busy("An OBD read is already running.")
         started = False
         try:
             conn = self.connection
@@ -200,6 +332,88 @@ class Controller:
         if job and job.running:
             job.stop()
 
+    def start_watch(self, mode: str = "raw", seconds: float = 20.0, label: str = "") -> str | None:
+        """Record the PCM on the standing connection in the background: raw CAN monitor lines or 010C polling.
+        Returns a message if it could not start, else None. Holds the read lock until the watch ends, so the
+        heartbeat, reads and a second watch keep off the adapter while it is in monitor mode."""
+        if self.connection.state != "connected":
+            return "Connect to the adapter first."
+        if mode not in MODES:
+            return "Mode must be 'raw' or 'poll'."
+        try:
+            seconds = float(seconds)
+        except (TypeError, ValueError):
+            seconds = float("nan")
+        if not 0 < seconds <= MAX_SECONDS:
+            return "Watch length must be between 1 and 120 seconds."
+        return self._start_watch(mode, seconds, label)[1]
+
+    def _start_watch(self, mode: str, seconds: float | None, label: str, sess=None, *, until=None,
+                     ceiling: float = MAX_SECONDS, record=None) -> tuple[WatchJob | None, str | None]:
+        """Start a watch into `sess` (default: the current session). `seconds=None` with `until`/`ceiling` is a
+        capture-linked watch; `record(job)` replaces recording the saved watch in the case.
+        Returns (job, None), or (None, why it could not start)."""
+        if not self._take_obd_lock():
+            return None, "An OBD read or watch is already running."
+        started = False
+        try:
+            conn = self.connection
+            if conn.state != "connected":                   # dropped while we waited for a heartbeat
+                return None, "Connect to the adapter first."
+            transport = HeldTransport(conn.transport)
+            sess = sess or self.store.open(self.session_name)   # the watch goes to the case it was started on
+            case = Case(sess)
+            wrong = self._wrong_kind(transport, case)
+            if wrong:
+                return None, wrong
+
+            def saved(job: WatchJob) -> None:
+                # Runs on the watch thread while the read lock is still held: never take the read lock here.
+                if record:
+                    record(job)
+                else:
+                    case.append_watch(job.meta)
+
+            def finished() -> None:
+                try:
+                    # Like a read: anything but a clean end leaves the adapter's state unknown.
+                    if (job.restore_failed or job.reset or job.interrupted or job.error is not None
+                            or job.cancel_event.is_set() or job.outcome == "error"):
+                        conn.mark_cold()
+                    e = job.error
+                    if isinstance(e, ObdVehicleSilent) or (
+                            isinstance(e, ObdAdapterError) and e.kind in ("UNABLE TO CONNECT", "BUS INIT")):
+                        conn.note_vehicle(False)
+                    self.traffic.event(f"watch ended ({mode}, {(job.meta or {}).get('end_reason') or 'nothing kept'})")
+                finally:
+                    self._obd_lock.release()
+
+            job = WatchJob(transport, mode, sess.new_watch(), seconds=seconds, until=until, ceiling=ceiling,
+                           cold=conn.cold, sim=transport.sim, label=label,
+                           adapter=conn.adapter.label() if conn.adapter else "",
+                           session_name=sess.name, on_finish=finished, on_saved=saved)
+            length = "linked to a capture" if seconds is None else f"{seconds:g} s"
+            self.traffic.event(f"watch started ({mode}, {length})")
+            self.watch_job = job
+            job.start()
+            started = True
+            return job, None
+        finally:
+            if not started:
+                self._obd_lock.release()
+
+    def stop_watch(self) -> None:
+        """End the running watch and keep what was recorded."""
+        job = self.watch_job
+        if job and job.running:
+            job.stop()
+
+    def cancel_watch(self) -> None:
+        """Throw the running watch away; nothing is saved."""
+        job = self.watch_job
+        if job and job.running:
+            job.cancel()
+
     def read_obd(self, source="healthy"):
         """One OBD read into the current case, waiting for it to finish.
         Returns (readout, None) or (None, message)."""
@@ -229,20 +443,24 @@ class Controller:
         finally:
             self._obd_lock.release()
 
-    def disconnect(self) -> None:
+    def disconnect(self) -> str | None:
+        """Close the standing connection. Returns why it could not (a read or watch is running), else None."""
         if not self._take_obd_lock():
-            return
+            return self._busy("A read is running; wait for it or cancel it first.")
         try:
             self.connection.disconnect()
         finally:
             self._obd_lock.release()
+        return None
 
     def relink(self) -> str | None:
         """Close the connection and open it again with the same source."""
         source = self.connection.source
         if not source:
             return "Nothing to relink. Press Connect."
-        self.disconnect()
+        err = self.disconnect()
+        if err:
+            return err
         if self.connection.state not in ("disconnected",):
             return "A read is running; wait for it or cancel it first."
         return self.connect(source)
@@ -250,12 +468,16 @@ class Controller:
     def connection_status(self) -> dict:
         s = self.connection.status()
         s["reading"] = bool(self.obd_job and self.obd_job.running)
+        s["watching"] = bool(self.watch_job and self.watch_job.running)
         s["traffic_error"] = self.traffic.last_error
         return s
 
     def cancel(self) -> None:
         if self.job:
             self.job.cancel()
+            link = self._link
+            if link and link.watch and link.watch.running:
+                link.watch.stop()                          # a capture cancel keeps its watch
 
     def snapshot(self) -> dict:
         job = self.job
@@ -263,6 +485,7 @@ class Controller:
                     state=job.state if job else "idle", message=job.message if job else "",
                     running=self.running, seconds_left=job.seconds_left if job else 0.0,
                     saved_id=job.saved_id if job else None, hook_error=job.hook_error if job else "",
+                    watch_note=job.note if job else "",
                     findings=[], warnings=[])
         if job and job.analysis:
             snap["findings"] = [{"severity": f.severity, "title": f.title}
@@ -298,10 +521,30 @@ def get_controller() -> Controller:
         return _controller
 
 
-def reset_controller() -> None:
+def reset_controller(join_s: float = 5.0) -> None:
+    """Shut the shared controller down: cancel its capture, read and watch, wait for each (bounded), close the
+    adapter connection and stop the MCP server. Never blocks forever."""
     global _controller
     with _guard:
-        if _controller is not None and _controller.mcp is not None:
-            from .mcp_server import stop_mcp_server           # imported here: mcp_server never imports this module
-            stop_mcp_server(_controller)
-        _controller = None
+        c, _controller = _controller, None
+    if c is None:
+        return
+    for job in (c.job, c.obd_job, c.watch_job):
+        if job is not None:
+            try:
+                if job.running:
+                    job.cancel()
+                job.join(join_s)
+            except Exception:
+                pass
+    try:
+        if c._obd_lock.acquire(timeout=join_s):           # bounded: a stuck job must not hang the shutdown
+            try:
+                c.connection.disconnect()
+            finally:
+                c._obd_lock.release()
+    except Exception:
+        pass
+    if c.mcp is not None:
+        from .mcp_server import stop_mcp_server           # imported here: mcp_server never imports this module
+        stop_mcp_server(c)

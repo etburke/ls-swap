@@ -13,6 +13,14 @@ class ObdTimeout(ObdError):
     pass
 
 
+class ObdMonitorStuck(ObdTimeout):
+    """The adapter gave no prompt after the stop byte: it may still be in monitor mode, so its settings can
+    no longer be trusted (the connection must be set up again)."""
+
+    def __init__(self, message: str = "The adapter did not leave monitor mode."):
+        super().__init__(message)
+
+
 class ObdCancelled(ObdError):
     """The person cancelled the read. Nothing is recorded."""
 

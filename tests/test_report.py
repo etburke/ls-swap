@@ -5,6 +5,27 @@ from crank.report import build_figure, build_overlay, decimate, text_report, to_
 from crank.sim import generate
 
 
+def test_report_has_an_obd_watches_section_in_markdown_and_html(tmp_path):
+    from crank.case import Case
+    from crank.render import to_html, to_markdown
+    from crank.store import SessionStore
+    from crank.summary import build_summary
+    case = Case(SessionStore(tmp_path).open("c"))
+    case.append_watch({"id": "001", "mode": "raw", "sim": True, "seconds": 18.4, "end_reason": "time",
+                       "notes": [], "capture_id": "003",
+                       "summary": {"lines": 10, "frames": 10, "ids": {"0C9": {"count": 10, "hz": 1.0}},
+                                   "engine_speed": {"max": 200.0, "best_effort": True}}})
+    s = build_summary(case)
+    md, html = to_markdown(s), to_html(s)
+    for out in (md, html):
+        assert "OBD watches" in out and "best-effort decoding" in out
+        assert "OBD watch 001" in out and "capture 003" in out
+    assert "## OBD watches" in md and "<h2>OBD watches</h2>" in html
+    empty = Case(SessionStore(tmp_path).open("empty"))
+    empty.append("symptom", "no RPM")
+    assert "OBD watches" not in to_markdown(build_summary(empty))
+
+
 def test_decimate_keeps_a_single_sample_runt():
     t = np.arange(200_000) / 1e4
     v = np.zeros(t.size)

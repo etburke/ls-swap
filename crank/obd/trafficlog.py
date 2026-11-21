@@ -102,6 +102,24 @@ class LoggingTransport(DelegatingTransport):
         self.log.reply(reply, (time.monotonic() - start) * 1000, self._tag())
         return reply
 
+    def stream(self, cmd, on_line, stop, max_seconds, silence_s=1.0):
+        tag, count = self._tag(), [0]
+
+        def counted(ts, line):
+            count[0] += 1
+            on_line(ts, line)
+        self.log.command(cmd, tag)
+        self.log.event("watch stream started", tag)
+        try:
+            end = self.inner.stream(cmd, counted, stop, max_seconds, silence_s)
+        except BaseException as e:                    # an adapter error, or a bug in on_line: the end is logged either way
+            self.log.error(e, tag)
+            self.log.event(f"watch stream ended (error, {count[0]} lines)", tag)
+            raise
+        stuck = "" if getattr(end, "at_prompt", True) else ", no prompt after the stop byte"
+        self.log.event(f"watch stream ended ({end.reason}, {count[0]} lines{stuck})", tag)
+        return end
+
     def close(self) -> None:
         self.log.event("port close", self._tag())
         self.inner.close()

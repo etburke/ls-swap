@@ -26,7 +26,8 @@ class Summary:
     adapter: str = ""                                   # label of the adapter on the latest real OBD read
     obd_notes: list = field(default_factory=list)        # notes from the latest OBD read (retries, resets, gaps)
     obd_unavailable: list = field(default_factory=list)  # [{"name","reason"}] it could not read; not_in_map left out
-    captures: list = field(default_factory=list)        # [{"id","label","ts","sim","snapshot"}]
+    captures: list = field(default_factory=list)        # [{"id","label","ts","sim","snapshot","watch_id"}]
+    watches: list = field(default_factory=list)         # [{"id","ts","text","sim","capture_id"}]
     before_after: list = field(default_factory=list)    # [{"change","before","after"}]
     not_tried: list = field(default_factory=list)       # guided step titles with no data
     attachments: list = field(default_factory=list)
@@ -45,8 +46,43 @@ def _evidence(refs: dict) -> list:
     return out
 
 
+_WATCH_ENDS = {"stopped": "stopped by you", "buffer_full": "the adapter's buffer overflowed",
+               "reset": "the adapter reset", "silent": "no CAN traffic for 1 s",
+               "prompt": "the adapter left monitor mode", "error": "the adapter link failed"}
+
+
+def _describe_watch(e: Event) -> str:
+    d, s = e.data, e.data.get("summary") or {}
+    sim = " [SIMULATED]" if d.get("sim") else ""
+    label = f": {e.text}" if e.text else ""             # an AI-started watch is labelled "[AI] ..."
+    head = f"OBD watch {e.refs.get('watch', '?')}{sim}{label}"
+    secs = f"{float(d.get('seconds') or 0):.1f} s"
+    if d.get("mode") == "poll":
+        rpm = s.get("rpm") or {}
+        top = "no answer to 010C" if rpm.get("max") is None else f"max {rpm['max']:,.0f} rpm"
+        text = f"{head} (poll, {secs}): {s.get('samples', 0):,} RPM samples (010C, official), {top}"
+        v = s.get("voltage")
+        if v:
+            text += f"; adapter voltage {v['min']:.1f}–{v['max']:.1f} V"
+    else:
+        n = len(s.get("ids") or {})
+        es = s.get("engine_speed")
+        speed = (f"engine speed (best-effort, ID 0C9) max {es['max']:,.0f} rpm" if es and es.get("max") is not None
+                 else "no engine speed frames seen")
+        text = (f"{head} (raw CAN, {secs}): {s.get('frames', 0):,} frames from {n} ID{'' if n == 1 else 's'}; "
+                f"{speed}")
+    end = d.get("end_reason")
+    if end == "until":                                 # a linked watch's normal end
+        text += "; ended with the linked capture"
+    elif end and end != "time":
+        text += f"; stopped early: {_WATCH_ENDS.get(end, str(end).replace('_', ' '))}"
+    return text
+
+
 def describe(e: Event) -> str:
     d = e.data
+    if e.type == "watch":
+        return _describe_watch(e)
     if e.type == "measurement":
         where = f" ({d['where']})" if d.get("where") else ""
         cond = f", {d['conditions']}" if d.get("conditions") else ""
@@ -137,9 +173,19 @@ def build_summary(case: Case) -> Summary:
     s.codes = list(codes.values())
 
     caps = [e for e in events if e.type == "capture"]
+    watches = [e for e in events if e.type == "watch"]
+    # A linked watch and its capture are cross-referenced by whichever event was written second: the watch
+    # (data capture_id) when the capture saved first, the capture (refs watch) when the watch did.
+    cap_of_watch = {e.refs["watch"]: e.refs.get("capture", "") for e in caps if e.refs.get("watch")}
+    cap_of_watch.update({e.refs.get("watch", ""): e.data.get("capture_id") or e.refs.get("capture")
+                         for e in watches if e.data.get("capture_id") or e.refs.get("capture")})
+    watch_of_cap = {c: w for w, c in cap_of_watch.items() if c}
     s.captures = [dict(id=e.refs.get("capture", ""), label=e.text, ts=e.ts,
-                       sim=bool(e.data.get("sim")), snapshot=e.data.get("snapshot")) for e in caps]
+                       sim=bool(e.data.get("sim")), snapshot=e.data.get("snapshot"),
+                       watch_id=watch_of_cap.get(e.refs.get("capture", ""))) for e in caps]
     by_id = {c["id"]: c for c in s.captures}
+    s.watches = [dict(id=e.refs.get("watch", ""), ts=e.ts, text=describe(e), sim=bool(e.data.get("sim")),
+                      capture_id=cap_of_watch.get(e.refs.get("watch", ""))) for e in watches]
 
     for i, e in enumerate(events):
         if e.type != "change":

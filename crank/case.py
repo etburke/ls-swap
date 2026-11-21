@@ -9,7 +9,8 @@ from pathlib import Path
 
 from .store import Session, _read_json, _write_json
 
-EVENT_TYPES = ("symptom", "observation", "code_read", "measurement", "capture", "change", "hypothesis")
+EVENT_TYPES = ("symptom", "observation", "code_read", "measurement", "capture", "change", "hypothesis",
+               "watch")
 HYPOTHESIS_STATUSES = ("open", "ruled_out", "confirmed")
 
 # What a finding code suggests checking next (used to seed the hypotheses board).
@@ -127,6 +128,8 @@ def _validate(type_: str, text: str, data: dict) -> None:
         raise ValueError(f"a {type_} needs some text")
     elif type_ == "code_read" and not data.get("codes") and data.get("source") != "obd":
         raise ValueError("a code read needs at least one code")
+    elif type_ == "watch" and data.get("mode") not in ("raw", "poll"):
+        raise ValueError("a watch needs a mode of 'raw' or 'poll'")
 
 
 def capture_snapshot(analysis) -> dict | None:
@@ -197,9 +200,12 @@ class Case:
                 f.write(lead + ev.to_json() + "\n")
         return ev
 
-    def append_capture(self, capture_id: str, label: str, analysis, sim: bool) -> Event:
-        return self.append("capture", label, {"snapshot": capture_snapshot(analysis), "sim": sim},
-                           {"capture": capture_id})
+    def append_capture(self, capture_id: str, label: str, analysis, sim: bool,
+                       watch_id: str | None = None) -> Event:
+        refs = {"capture": capture_id}
+        if watch_id:
+            refs["watch"] = watch_id
+        return self.append("capture", label, {"snapshot": capture_snapshot(analysis), "sim": sim}, refs)
 
     def append_obd(self, readout) -> list[Event]:
         """Record one OBD read: a code_read (empty list = a clean read) plus a measurement per live value."""
@@ -214,10 +220,18 @@ class Case:
                 "conditions": cond, "sim": readout.sim}, {"obd": out[0].id}))
         return out
 
+    def append_watch(self, meta: dict) -> Event:
+        """Record one saved OBD watch (its meta from the watch job); the frames stay in watches/NNN.jsonl."""
+        data = {k: meta.get(k) for k in ("mode", "sim", "seconds", "end_reason", "notes", "summary", "capture_id")}
+        refs = {"watch": meta["id"]}
+        if meta.get("capture_id"):
+            refs["capture"] = meta["capture_id"]
+        return self.append("watch", meta.get("label") or "", data, refs)
+
     def obd_kinds(self) -> set[str]:
-        """'real' and/or 'simulated' for the OBD reads recorded in this case. A case holds one kind."""
-        return {"simulated" if e.data.get("sim") else "real"
-                for e in self.events() if e.type == "code_read" and e.data.get("source") == "obd"}
+        """'real' and/or 'simulated' for the OBD reads and watches recorded in this case. A case holds one kind."""
+        return {"simulated" if e.data.get("sim") else "real" for e in self.events()
+                if (e.type == "code_read" and e.data.get("source") == "obd") or e.type == "watch"}
 
     def log_guided_step(self, step, values: dict) -> list[Event]:
         """Turn a saved guided-test step into events."""

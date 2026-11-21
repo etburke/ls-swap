@@ -103,6 +103,10 @@ def test_every_read_tool_copes_with_a_brand_new_empty_session(ctrl, tools):
     assert tools.list_captures() == {"session": "fresh", "captures": []}
     assert "Nothing has been recorded" in tools.get_case_report()["text"]
     json.dumps(summary, allow_nan=False)
+    assert tools.list_watches() == {"session": "fresh", "watches": []}
+    assert tools.watch_progress()["state"] == "idle"
+    with pytest.raises(ToolError, match="Watches: none"):
+        tools.get_watch("001")
 
 
 def test_get_case_summary_returns_the_timeline_and_suspects(ctrl, tools):
@@ -247,6 +251,9 @@ GATED_CONTROL = [
     lambda t: t.obd_read("sim:healthy"),
     lambda t: t.obd_stop(),
     lambda t: t.obd_cancel(),
+    lambda t: t.obd_watch(),
+    lambda t: t.obd_watch_stop(),
+    lambda t: t.obd_watch_cancel(),
 ]
 
 
@@ -413,3 +420,142 @@ def test_set_suspect_creates_then_updates_by_title(ctrl, tools):
         tools.set_suspect("Chafed harness", "maybe")
     with pytest.raises(ToolError, match="needs a title"):
         tools.set_suspect("  ")
+
+
+def finish_watch(ctrl):
+    ctrl.watch_job.join(10)
+    assert not ctrl.watch_job.running
+
+
+def test_watch_tools_are_gated(ctrl, tools):
+    for call in (lambda: tools.obd_watch(), lambda: tools.obd_watch_stop(), lambda: tools.obd_watch_cancel()):
+        with pytest.raises(ToolError, match="AI control is off"):
+            call()
+    assert ctrl.watch_job is None
+
+
+def test_obd_watch_runs_and_get_watch_returns_a_downsampled_series(ctrl, tools):
+    ctrl.ai_control = True
+    ctrl.sync(session_name="bench")
+    with pytest.raises(ToolError, match="Connect to the adapter first"):
+        tools.obd_watch()
+    assert tools.obd_connect("sim:cranking_rpm_seen")["state"] == "connected"
+    try:
+        r = tools.obd_watch("raw", 1.0, "crank")
+        assert r["started"] is True and r["mode"] == "raw" and r["session"] == "bench"
+        assert "monitoring" in r["message"] and "crank" in r["message"]
+        finish_watch(ctrl)
+        [w] = tools.list_watches()["watches"]
+        assert w["label"] == "[AI] crank" and w["mode"] == "raw" and w["sim"] is True
+        assert "OBD watch 001" in w["headline"]
+        full = tools.get_watch("001", max_points=5000)
+        assert full["watch"]["id"] == "001" and full["summary"]["frames"] > 20 and "0C9" in full["ids"]
+        assert full["returned"] == full["samples"] and full["series_source"].endswith("(best-effort)")
+        small = tools.get_watch("001", max_points=20)
+        assert small["samples"] == full["samples"] and small["returned"] <= 20
+        assert max(v for _, v in small["engine_speed_series"]) == max(v for _, v in full["engine_speed_series"])
+        assert all(0 <= t < 3 for t, _ in small["engine_speed_series"])
+        json.dumps(small, allow_nan=False)
+
+        assert tools.obd_watch("poll", 1.0)["mode"] == "poll"
+        finish_watch(ctrl)
+        poll = tools.get_watch("002")
+        assert poll["series_source"] == "010C (official)" and poll["samples"] > 0 and poll["ids"] == {}
+        assert [w["id"] for w in tools.list_watches()["watches"]] == ["001", "002"]
+    finally:
+        tools.obd_disconnect()
+
+
+def test_obd_watch_stop_and_cancel(ctrl, tools):
+    ctrl.ai_control = True
+    ctrl.sync(session_name="bench")
+    tools.obd_connect("sim:cranking_rpm_seen")
+    try:
+        tools.obd_watch("raw", 60)
+        assert ctrl.watch_job.monitoring.wait(3)
+        tools.obd_watch_stop()
+        finish_watch(ctrl)
+        assert ctrl.watch_job.state == "stopped" and len(tools.list_watches()["watches"]) == 1
+        tools.obd_watch("raw", 60)
+        tools.obd_watch_cancel()
+        finish_watch(ctrl)
+        assert len(tools.list_watches()["watches"]) == 1
+    finally:
+        tools.obd_disconnect()
+
+
+def test_get_watch_unknown_id_lists_real_ones(ctrl, tools):
+    ctrl.ai_control = True
+    ctrl.sync(session_name="bench")
+    tools.obd_connect("sim:cranking_rpm_seen")
+    try:
+        tools.obd_watch("poll", 1.0)
+        finish_watch(ctrl)
+    finally:
+        tools.obd_disconnect()
+    with pytest.raises(ToolError, match=r"no watch '999'.*Watches: 001\."):
+        tools.get_watch("999")
+    with pytest.raises(ToolError, match="no watch"):
+        tools.get_watch("../x")
+    with pytest.raises(ToolError, match="There is no session"):
+        tools.get_watch("001", session="nope")
+
+
+@pytest.mark.parametrize("n", [0, 9, 5001, -1])
+def test_get_watch_rejects_silly_max_points(tools, n):
+    with pytest.raises(ToolError, match="max_points must be between 10 and 5000"):
+        tools.get_watch("001", max_points=n)
+
+
+def test_watch_progress_idle_and_running(ctrl, tools):
+    assert tools.watch_progress() == {"state": "idle", "running": False, "monitoring": False}
+    ctrl.ai_control = True
+    ctrl.sync(session_name="bench")
+    tools.obd_connect("sim:cranking_rpm_seen")
+    try:
+        tools.obd_watch("raw", 60)
+        assert ctrl.watch_job.monitoring.wait(3)
+        p = tools.watch_progress()
+        assert p["running"] is True and p["monitoring"] is True and p["session"] == "bench"
+        assert {"state", "seconds", "lines", "frames", "latest_rpm", "max_rpm", "message"} <= set(p)
+        assert p["mode"] == "raw" and p["rpm_source"] == "decoded from raw CAN frames (best-effort, ID 0C9)"
+        with pytest.raises(ToolError, match="An OBD watch is running"):
+            tools.obd_disconnect()
+        tools.obd_watch_stop()
+        finish_watch(ctrl)
+        p = tools.watch_progress()
+        assert p["running"] is False and p["state"] == "stopped" and p["lines"] > 0
+        json.dumps(p, allow_nan=False)
+        tools.obd_watch("poll", 1)
+        finish_watch(ctrl)
+        p = tools.watch_progress()
+        assert p["mode"] == "poll" and p["rpm_source"] == "010C (official)"
+    finally:
+        tools.obd_disconnect()
+
+
+def test_arm_capture_with_watch_links_them(ctrl, tools):
+    ctrl.ai_control = True
+    ctrl.sync(mode="Simulator", scenario="ref_sag", session_name="bench")
+    tools.obd_connect("sim:cranking_rpm_seen")
+    try:
+        r = tools.arm_capture("linked", watch=True)
+        assert r["armed"] is True and r["watch"] is True and r["watch_note"] == ""
+        assert "get_capture_progress" in r["message"] and "'armed'" in r["message"]
+        assert "Tell the owner to crank the engine now" not in r["message"]
+        ctrl.job.join(30)
+        assert ctrl.job.state == "done", ctrl.job.message
+        finish_watch(ctrl)
+        [cap] = tools.list_captures()["captures"]
+        [w] = tools.list_watches()["watches"]
+        assert tools.get_watch(w["id"])["watch"]["capture_id"] == cap["id"]
+        assert w["headline"].startswith("OBD watch")
+    finally:
+        tools.obd_disconnect()
+    # without a connection the capture still runs and the reply carries the reason
+    ctrl.sync(session_name="bench2")
+    r = tools.arm_capture("alone", watch=True)
+    ctrl.job.join(30)
+    assert ctrl.job.state == "done" and tools.list_watches()["watches"] == []
+    assert "Connect to the adapter first" in ctrl.snapshot()["watch_note"]
+    assert r["armed"] is True

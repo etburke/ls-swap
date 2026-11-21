@@ -9,9 +9,9 @@ from .analysis import Analysis, analyze_capture
 from .model import CaptureData, CaptureSettings, Thresholds
 from .scope import ScopeError, ScopeInterface
 
-STATES = ("idle", "configuring", "armed", "triggered", "downloading",
+STATES = ("idle", "preparing", "configuring", "armed", "triggered", "downloading",
           "analyzing", "done", "error", "cancelled")
-ACTIVE = ("configuring", "armed", "triggered", "downloading", "analyzing")
+ACTIVE = ("preparing", "configuring", "armed", "triggered", "downloading", "analyzing")
 
 
 class CaptureJob:
@@ -19,12 +19,17 @@ class CaptureJob:
                  thresholds: Thresholds | None = None,
                  save: Callable[[CaptureData], object] | None = None,
                  poll_s: float = 0.2, never_armed_s: float = 3.0,
-                 on_done: Callable[["CaptureJob"], None] | None = None):
+                 on_done: Callable[["CaptureJob"], None] | None = None,
+                 before_arm: Callable[["CaptureJob"], str | None] | None = None,
+                 on_end: Callable[["CaptureJob"], None] | None = None):
         self.scope, self.settings = scope, settings
         self.thresholds = thresholds or Thresholds()
         self.save, self.poll_s, self.never_armed_s = save, poll_s, never_armed_s
         self.on_done, self.hook_error, self._notified = on_done, "", False
+        self.before_arm, self.on_end = before_arm, on_end
         self.state, self.message = "idle", ""
+        self.note = ""                                # why the linked OBD watch did not start, if it did not
+        self.triggered_at: float | None = None        # laptop clock when the state became "triggered"
         self.data: CaptureData | None = None
         self.analysis: Analysis | None = None
         self.saved_id = None
@@ -40,6 +45,10 @@ class CaptureJob:
 
     def cancel(self) -> None:
         self._cancel.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancel.is_set()
 
     def join(self, timeout: float | None = None) -> None:
         if self._thread:
@@ -59,6 +68,8 @@ class CaptureJob:
 
     def _run(self) -> None:
         try:
+            if self.before_arm and not self._prepare():
+                return
             self._set("configuring")
             self.scope.configure(self.settings)
             self.scope.arm()
@@ -79,6 +90,25 @@ class CaptureJob:
             self._set("error", f"{type(e).__name__}: {e}")
         finally:
             self._notify()                            # a saved capture always reaches the case log
+            if self.on_end:
+                try:
+                    self.on_end(self)
+                except Exception as e:
+                    self.hook_error = self.hook_error or f"{type(e).__name__}: {e}"
+
+    def _prepare(self) -> bool:
+        """Run the before_arm hook (it starts the linked OBD watch) before the scope is touched, so
+        "Crank the engine now." is never shown before the watch is recording. False if cancelled meanwhile."""
+        self._set("preparing", "Starting the OBD watch…")
+        try:
+            self.note = self.before_arm(self) or ""
+        except Exception as e:                        # the capture runs regardless
+            self.note = f"{type(e).__name__}: {e}"
+        self.started_at = time.time()                 # the trigger countdown starts at the scope, not the watch
+        if self._cancel.is_set():
+            self._set("cancelled", "Capture cancelled before the scope was armed.")
+            return False
+        return True
 
     def _notify(self) -> None:
         if self.on_done and self.saved_id is not None and not self._notified:
@@ -100,6 +130,7 @@ class CaptureJob:
                 seen_armed = True
                 if st == "TD":
                     t_trig = t_trig or time.time()
+                    self.triggered_at = t_trig
                     self._set("triggered", "Trigger seen; recording.")
             elif seen_armed:
                 return True

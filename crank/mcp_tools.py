@@ -19,12 +19,13 @@ from .obd.trafficlog import tail_lines
 from .obd.transport import SCENARIOS as OBD_SCENARIOS
 from .render import to_html, to_markdown
 from .report import decimate
-from .summary import build_summary
+from .summary import build_summary, describe
 
 AI_LABEL = "[AI] "
 NOTE_TYPES = ("observation", "symptom", "change")
 MAX_SIGNAL_POINTS = 5000
 MAX_LOG_LINES = 500
+MIN_SERIES_POINTS, MAX_SERIES_POINTS = 10, 5000
 EVENT_LIMIT = 200
 OFF_MESSAGE = ("AI control is off. Ask the owner to switch on 'Allow AI control' in the app's sidebar "
                "to use this tool.")
@@ -140,6 +141,27 @@ class Tools:
             out["note"] = "The result was added to the case; call get_case_summary to see it."
         return out
 
+    def _watch_state(self) -> dict:
+        job = self.ctrl.watch_job
+        if job is None:
+            return {"state": "idle", "running": False, "monitoring": False}
+        return {"state": job.state, "running": job.running, "monitoring": job.monitoring.is_set(),
+                "mode": job.mode, "seconds": round(job.seconds, 1), "lines": job.lines, "frames": job.frames,
+                "latest_rpm": job.latest_rpm, "max_rpm": job.max_rpm, "rpm_source": self._RPM_SOURCE[job.mode],
+                "session": job.session_name, "message": job.message}
+
+    _RPM_SOURCE = {"raw": "decoded from raw CAN frames (best-effort, ID 0C9)", "poll": "010C (official)"}
+
+    @staticmethod
+    def _rpm_series(meta: dict, rows: list[dict]) -> tuple[list[tuple[float, float]], str]:
+        """(seconds from the start of the watch, rpm) from the decoded raw rows or the 010C poll rows."""
+        t0 = meta.get("started") or 0.0
+        if meta.get("mode") == "poll":
+            pts = [(r["t"] - t0, r["value"]) for r in rows if r.get("cmd") == "010C" and r.get("value") is not None]
+            return pts, "010C (official)"
+        pts = [(r["t"] - t0, d["value"]) for r in rows for d in r.get("decoded", []) if d["name"] == "Engine speed"]
+        return pts, "decoded from raw CAN frames (best-effort)"
+
     # -- status (always available)
     def list_sessions(self) -> dict[str, Any]:
         """List the saved sessions (cases) and which one the laptop currently has selected."""
@@ -161,6 +183,12 @@ class Tools:
     def obd_progress(self) -> dict[str, Any]:
         """The current or last OBD read: state, seconds, and any message. Poll this after obd_read."""
         return jsonable(self._obd_state())
+
+    def watch_progress(self) -> dict[str, Any]:
+        """The current or last OBD watch: state, whether it is recording (monitoring), seconds, line and frame
+        counts, the latest and highest RPM seen with its rpm_source (raw mode: best-effort decodes of CAN ID 0C9;
+        poll mode: official 010C), and any message. Poll this after obd_watch."""
+        return jsonable(self._watch_state())
 
     def get_obd_log(self, lines: int = 100, session: str | None = None) -> dict[str, Any]:
         """The last lines of the adapter traffic log for a session (heartbeats hidden). Diagnostic only."""
@@ -200,6 +228,43 @@ class Tools:
                         "sim": bool(c.get("sim")), "note": c.get("note", ""),
                         "verdict": verdict[0]["title"] if verdict else None})
         return {"session": sess.name, "captures": out}
+
+    def list_watches(self, session: str | None = None) -> dict[str, Any]:
+        """The OBD watches in a session: id, label, mode (raw CAN or poll), start time, whether simulated, and
+        a one-line headline of what each recorded."""
+        sess = self._session(session)
+        events = {e.refs.get("watch"): e for e in Case(sess).all_events() if e.type == "watch"}
+        out = []
+        for m in sess.list_watches():
+            ev = events.get(m["id"])
+            out.append({"id": m["id"], "label": m.get("label", ""), "mode": m.get("mode"),
+                        "started": m.get("started"), "sim": bool(m.get("sim")),
+                        "headline": describe(ev) if ev else None})
+        return jsonable({"session": sess.name, "watches": out})
+
+    def get_watch(self, watch_id: str, session: str | None = None, max_points: int = 500) -> dict[str, Any]:
+        """One saved OBD watch: its metadata and summary, the inventory of CAN IDs seen (raw mode), and
+        engine_speed_series, [[seconds since the watch began, rpm]] downsampled to at most max_points (10 to
+        5000) with a min/max envelope so spikes and dropouts survive. Raw-mode values are best-effort decodes
+        of what the PCM broadcast; polled 010C RPM is official OBD data."""
+        if not MIN_SERIES_POINTS <= max_points <= MAX_SERIES_POINTS:
+            raise ToolError(f"max_points must be between {MIN_SERIES_POINTS} and {MAX_SERIES_POINTS}.")
+        sess = self._session(session)
+        try:
+            meta, rows = sess.load_watch(watch_id)
+        except KeyError:
+            ids = [m["id"] for m in sess.list_watches()]
+            raise ToolError(f"There is no watch {watch_id!r} in session {sess.name!r}. "
+                            f"Watches: {', '.join(ids) or 'none'}.") from None
+        pts, source = self._rpm_series(meta, rows)
+        series = []
+        if pts:
+            td, vd = decimate(np.array([p[0] for p in pts]), np.array([p[1] for p in pts]), max_points)
+            series = [[round(float(a), 3), float(b)] for a, b in zip(td, vd)]
+        summary = meta.get("summary") or {}
+        return jsonable({"session": sess.name, "watch": meta, "summary": summary, "ids": summary.get("ids", {}),
+                         "engine_speed_series": series, "series_source": source, "samples": len(pts),
+                         "returned": len(series)})
 
     def get_capture_analysis(self, capture_id: str, session: str | None = None) -> dict[str, Any]:
         """Analyze a saved capture with the laptop's current thresholds: findings ranked worst first with
@@ -287,23 +352,64 @@ class Tools:
                 **analysis_dict(analyze_capture(data, th))}
 
     # -- control (need Allow AI control)
-    def arm_capture(self, label: str = "", note: str = "") -> dict[str, Any]:
+    def arm_capture(self, label: str = "", note: str = "", watch: bool = False,
+                    watch_mode: str = "raw") -> dict[str, Any]:
         """Arm the scope for one capture in the laptop's current session, mode, scenario and settings. The
         capture is labeled "[AI] ...". In real-scope mode the scope waits for the first crank edge, so tell
-        the owner to crank the engine; this tool only arms. Poll get_capture_progress for the result."""
+        the owner to crank the engine; this tool only arms. Poll get_capture_progress for the result. With
+        watch=true an OBD watch (watch_mode 'raw' or 'poll', needs a connection) is linked to the capture and
+        starts first; the scope is armed only once it is recording, so wait for the capture state "armed"
+        before telling the owner to crank."""
         self._gate()
         c = self.ctrl
         full = AI_LABEL + (label.strip() or "capture")
-        err = c.arm(full, note)
+        err = c.arm(full, note, watch=watch, watch_mode=watch_mode)
         if err:
             raise ToolError(err)
         sim = c.mode == "Simulator"
+        if watch:
+            return {"armed": True, "label": full, "session": c.session_name, "mode": c.mode,
+                    "scenario": c.scenario if sim else None, "watch": True, "watch_mode": watch_mode,
+                    "watch_note": c.snapshot()["watch_note"],
+                    "message": ("The linked OBD watch is starting first and the scope is armed once it is "
+                                "recording. Poll get_capture_progress until the capture state is 'armed' "
+                                "(message 'Crank the engine now.') before telling the owner to crank; if "
+                                "watch_note is set the watch did not start and the capture runs without it. "
+                                "In simulator mode no cranking is needed.")}
         return {"armed": True, "label": full, "session": c.session_name, "mode": c.mode,
                 "scenario": c.scenario if sim else None,
                 "message": ("Armed in simulator mode: no cranking is needed, the simulated capture finishes by "
                             "itself. Poll get_capture_progress." if sim else
                             "Armed. Tell the owner to crank the engine now; the scope waits for the first crank "
                             "edge. Poll get_capture_progress.")}
+
+    def obd_watch(self, mode: str = "raw", seconds: float = 20.0, label: str = "") -> dict[str, Any]:
+        """Start a read-only OBD watch on the open connection, in the background: mode 'raw' listens to the CAN
+        broadcast (best-effort decodes, never transmits) and 'poll' asks for 010C RPM. seconds is 1 to 120.
+        Poll watch_progress; once it shows monitoring true, tell the owner to crank the engine. The result goes
+        into the case; read it with get_watch."""
+        self._gate()
+        try:
+            err = self.ctrl.start_watch(mode, seconds, AI_LABEL + (label.strip() or "watch"))
+        except ObdError as e:
+            raise ToolError(str(e)) from e
+        if err:
+            raise ToolError(err)
+        return {"started": True, "mode": mode, "seconds": float(seconds), "session": self.ctrl.session_name,
+                "message": "Watch started in the background. Poll watch_progress and wait for monitoring: true "
+                           "before telling the owner to crank the engine; the result goes into the case."}
+
+    def obd_watch_stop(self) -> dict[str, Any]:
+        """End the running watch and keep what was recorded."""
+        self._gate()
+        self.ctrl.stop_watch()
+        return jsonable(self._watch_state())
+
+    def obd_watch_cancel(self) -> dict[str, Any]:
+        """Throw the running watch away; nothing is recorded."""
+        self._gate()
+        self.ctrl.cancel_watch()
+        return jsonable(self._watch_state())
 
     def cancel_capture(self) -> dict[str, Any]:
         """Cancel the running capture and disarm the scope."""
@@ -331,7 +437,9 @@ class Tools:
     def obd_disconnect(self) -> dict[str, Any]:
         """Close the held adapter connection."""
         self._gate()
-        self.ctrl.disconnect()
+        err = self.ctrl.disconnect()
+        if err:
+            raise ToolError(err)
         return jsonable(self.ctrl.connection_status())
 
     def obd_relink(self) -> dict[str, Any]:

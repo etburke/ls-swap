@@ -56,3 +56,14 @@ def test_atrv_is_allowed_but_not_with_arguments():
     for bad in ("ATRV1", "ATRV 12", "ATRVX"):
         with pytest.raises(ObdForbiddenCommand):
             check(bad)
+
+
+@pytest.mark.parametrize("cmd", ["ATMA", "at csm1", "ATCAF0", "ATCAF1", "ATD0", "ATD1"])
+def test_listen_only_monitor_commands_are_allowed(cmd):
+    assert check(cmd) == "".join(cmd.split()).upper()
+
+
+@pytest.mark.parametrize("cmd", ["ATCSM0", "ATSH7E0", "STMA", "ATMR0C9", "ATMT0C9", "STCSM0", "ATBD", "ATRTR"])
+def test_transmit_capable_and_unlisted_monitor_commands_stay_refused(cmd):
+    with pytest.raises(ObdForbiddenCommand):
+        check(cmd)
