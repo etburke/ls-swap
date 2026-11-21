@@ -9,7 +9,7 @@ from typing import Callable
 from . import protocol as P
 from .adapter import clean_id, parse_voltage
 from .canframes import DECODERS, decode, parse_line
-from .errors import ObdAdapterError, ObdCancelled, ObdProtocolError, ObdVehicleSilent
+from .errors import ObdAdapterError, ObdCancelled, ObdMonitorStuck, ObdProtocolError, ObdVehicleSilent
 from .reader import INIT
 
 MODES = ("raw", "poll")
@@ -85,6 +85,7 @@ class WatchJob:
         self.t, self.mode, self.writer = transport, mode, writer
         self.limit = ceiling if seconds is None else min(seconds, MAX_SECONDS)
         self.until, self.cold, self.sim, self.label, self.adapter = until, cold, sim, label, adapter
+        self.linked = until is not None               # a capture-linked watch: the capture says when to crank
         self.session_name, self._on_finish, self._on_saved = session_name, on_finish, on_saved
         self.cancel_event, self.stop_event = threading.Event(), threading.Event()
         self._halt = threading.Event()                # stop, cancel or until: end the stream / poll loop
@@ -94,6 +95,9 @@ class WatchJob:
         self.latest_rpm: float | None = None
         self.max_rpm: float | None = None
         self.restore_failed = False
+        self.error: Exception | None = None           # what ended the watch early, if anything raised
+        self.interrupted = False                      # a command was cut short (cancel, or stop before data)
+        self.outcome = ""                             # the final state, set just before on_finish runs
         self.protocol, self.notes, self._rows = "", [], []
         self.started_at = self.recording_at = self.finished_at = 0.0
         self._changed = self._reset = self._until_hit = False
@@ -122,6 +126,11 @@ class WatchJob:
     @property
     def running(self) -> bool:
         return self.state == "running"
+
+    @property
+    def reset(self) -> bool:
+        """The adapter reset during the watch (its settings were re-applied, or the attempt failed)."""
+        return self._reset
 
     @property
     def seconds(self) -> float:
@@ -194,6 +203,8 @@ class WatchJob:
             accepted.cancel()
             accepted.join()
         self._reset = end.reason == "reset"
+        if not end.at_prompt:                        # no prompt after the stop byte: it may still be monitoring
+            self.restore_failed = True
         return end.reason
 
     def _on_line(self, t: float, text: str) -> None:
@@ -261,13 +272,16 @@ class WatchJob:
 
     def _restore(self) -> None:
         """Leave the adapter as a read expects it: out of monitor mode (the stream did that) with its settings
-        back, or re-initialised after a reset. A failure is flagged so the connection can be marked cold."""
+        back, or re-initialised after a reset. Every reply must confirm (OK, or the banner for ATZ): an adapter
+        still monitoring answers a command with STOPPED instead. A failure is flagged so the connection can be
+        marked cold."""
         self.t.cancel = None
         if not (self._changed or self._reset):
             return
         try:
             for cmd in INIT if self._reset else ("ATCAF1", "ATD0"):
-                if "?" in self.t.send(cmd, 5.0):
+                reply = self.t.send(cmd, 5.0)
+                if ("ELM327" if cmd == "ATZ" else "OK") not in reply.upper():
                     self.restore_failed = True
         except Exception:
             self.restore_failed = True
@@ -278,10 +292,14 @@ class WatchJob:
         try:
             end_reason = self._run_raw() if self.mode == "raw" else self._run_poll()
         except ObdCancelled:
+            self.interrupted = True
             if not self.cancel_event.is_set():
                 end_reason = "stopped"               # stop or until before anything was recorded
         except Exception as e:                       # the link dropped, a timeout, or a bug: kept if lines came
             error, end_reason = e, "error"
+            if isinstance(e, ObdMonitorStuck):
+                self.restore_failed = True
+        self.error = error
         self._restore()
         if end_reason == "stopped" and self._until_hit:
             end_reason = "until"
@@ -302,10 +320,16 @@ class WatchJob:
         except Exception as e:                       # a storage failure while saving
             state, self.message = "error", f"{type(e).__name__}: {e}"
         finally:
-            if self._on_finish:
-                self._on_finish()                    # free the controller's lock before anyone sees the end
-            self.finished_at = time.time()
-            self.state = state
+            self.outcome = state
+            try:
+                if self._on_finish:
+                    self._on_finish()                # free the controller's lock before anyone sees the end
+            except Exception as e:
+                if not self.message:
+                    self.message = f"{type(e).__name__}: {e}"
+            finally:
+                self.finished_at = time.time()
+                self.state = state
 
     def _save(self, state: str, end_reason: str) -> str:
         if self.restore_failed:

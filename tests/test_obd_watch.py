@@ -249,3 +249,72 @@ def test_summaries_on_handmade_rows():
                                        "median_nonzero": 180.0, "first_nonzero_s": 0.5},
                  "voltage": {"min": 11.9, "max": 11.9}}
     assert summarize_raw([], 0.0)["engine_speed"] is None and summarize_poll([], 0.0)["voltage"] is None
+
+
+class RestoreAnswers(Recording):
+    """Answers the restore commands with `reply` (e.g. STOPPED: the adapter was still monitoring)."""
+
+    def __init__(self, inner, reply):
+        super().__init__(inner)
+        self.reply = reply
+
+    def send(self, cmd, timeout=5.0):
+        if cmd in ("ATCAF1", "ATD0"):
+            self.sent.append(cmd)
+            return self.reply
+        return super().send(cmd, timeout)
+
+
+def test_a_restore_reply_without_ok_fails_the_restore(tmp_path):
+    job = run(tmp_path, seconds=0.3, transport=RestoreAnswers(SimTransport("cranking_rpm_seen"), "STOPPED"))
+    assert job.restore_failed and any("could not be restored" in n for n in job.meta["notes"])
+
+
+def test_an_atz_restore_without_a_banner_fails_the_restore(tmp_path):
+    class NoBanner(Recording):
+        def send(self, cmd, timeout=5.0):
+            return "" if cmd == "ATZ" and ("stream", "ATMA") in self.sent else super().send(cmd, timeout)
+    job = run(tmp_path, "reset_mid_watch", transport=NoBanner(SimTransport("reset_mid_watch")))
+    assert job.meta["end_reason"] == "reset" and job.restore_failed
+
+
+class EndsWith(Recording):
+    """The stream records a few lines then ends with `end`, or raises `exc`."""
+
+    def __init__(self, inner, end=None, exc=None):
+        super().__init__(inner)
+        self.end, self.exc = end, exc
+
+    def stream(self, cmd, on_line, stop, max_seconds, silence_s=1.0):
+        self.sent.append(("stream", cmd))
+        for _ in range(3):
+            on_line(time.time(), "1A180000000000000000")
+        if self.exc:
+            raise self.exc
+        return self.end
+
+
+def test_an_adapter_left_monitoring_fails_the_restore(tmp_path):
+    t = EndsWith(SimTransport("cranking_rpm_seen"), end=StreamEnd("time", at_prompt=False))
+    job = run(tmp_path, transport=t)
+    assert job.state == "done" and job.restore_failed and job.frames == 3
+
+
+def test_monitor_stuck_on_the_way_out_fails_the_restore(tmp_path):
+    from crank.obd.errors import ObdMonitorStuck
+    job = run(tmp_path, transport=EndsWith(SimTransport("cranking_rpm_seen"), exc=ObdMonitorStuck()))
+    assert job.restore_failed and job.error is not None and job.frames == 3
+
+
+def test_a_failing_on_finish_still_ends_the_job(tmp_path):
+    def boom():
+        raise RuntimeError("callback bug")
+    job = run(tmp_path, seconds=0.2, on_finish=boom)
+    assert job.state == "done" and job.finished_at
+
+
+def test_reset_and_linked_are_public(tmp_path):
+    job = run(tmp_path, "reset_mid_watch")
+    assert job.reset is True and job.linked is False
+    linked, _, _ = make(tmp_path, seconds=None, until=lambda: False)
+    assert linked.linked is True and linked.reset is False

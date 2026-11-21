@@ -26,3 +26,9 @@ def test_unknown_ids_parse_but_decode_to_nothing():
 
 def test_short_0c9_decodes_to_nothing():
     assert decode(parse_line("0C9 2 00 0C")) == []
+
+
+@pytest.mark.parametrize("line", ["0C9 8 00\x1c12 34 00 00 00 00 00", "0C98001234\x1f000000000000",
+                                  "0C9 8 00 0C\x1e80 00 00 00 00 00"])
+def test_an_ascii_control_byte_in_a_line_is_junk_not_an_exception(line):
+    assert parse_line(line) is None

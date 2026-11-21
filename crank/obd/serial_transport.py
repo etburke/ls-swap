@@ -7,10 +7,11 @@ import threading
 import time
 
 from . import allowlist
-from .errors import ObdCancelled, ObdNoAdapter, ObdTimeout
+from .errors import ObdCancelled, ObdForbiddenCommand, ObdMonitorStuck, ObdNoAdapter, ObdTimeout
 from .transport import StreamEnd, Transport
 
 BAUD_FALLBACK = 38400
+STREAM_ONLY = frozenset({"ATMA"})                     # commands that start monitoring: only stream() may send them
 
 
 def _default_factory(port: str, baud: int, timeout: float):
@@ -20,6 +21,8 @@ def _default_factory(port: str, baud: int, timeout: float):
 
 class SerialTransport(Transport):
     sim = False
+    PROMPT_WAIT_S = 1.0                               # after the adapter ends monitoring itself: wait for its prompt
+    STOP_WAIT_S = 2.0                                 # after the stop byte: wait for the prompt
 
     def __init__(self, port: str, baud: int = 115200, serial_factory=None, atz_timeout: float = 3.0):
         self.port, self.baud, self.atz_timeout = port, baud, atz_timeout
@@ -59,6 +62,8 @@ class SerialTransport(Transport):
 
     def send(self, cmd: str, timeout: float = 5.0) -> str:
         norm = allowlist.check(cmd)                   # refuse before anything is written
+        if norm in STREAM_ONLY:
+            raise ObdForbiddenCommand(f"Refused to send {norm!r} with send(): use stream() for monitor commands.")
         if self._ser is None:
             raise ObdNoAdapter("The adapter is not open.")
         self.check_cancel()
@@ -79,27 +84,35 @@ class SerialTransport(Transport):
     def stream(self, cmd, on_line, stop, max_seconds, silence_s=1.0) -> StreamEnd:
         """Run a monitor command and hand each line to `on_line`. Ends on stop, time, silence, or when the
         adapter itself ends it; our own endings stop the monitor with one space (never a bare CR, which
-        would repeat the command) and resync."""
+        would repeat the command) and resync. An adapter-ended stream is read on to its prompt, and gets the
+        stop byte if none comes. If no prompt follows the stop byte, `at_prompt` is False (or, on an exception,
+        ObdMonitorStuck is raised): the adapter may still be monitoring and its settings cannot be trusted."""
         norm = allowlist.check(cmd)
         if self._ser is None:
             raise ObdNoAdapter("The adapter is not open.")
         self.check_cancel()
         ours = ("stopped", "time", "silent")
+        self._rest = b""
         with self._lock:
             try:
                 try:
                     end = self._read_stream(norm, on_line, stop, max_seconds, silence_s)
-                except BaseException:                     # cancel, a bad on_line, Ctrl-C: never leave the adapter monitoring
+                except BaseException as e:                # cancel, a bad on_line, Ctrl-C: never leave the adapter monitoring
+                    stopped = True
                     try:
-                        self._stop_monitor()
+                        stopped = self._stop_monitor()
                     except OSError:
                         pass                              # a dropped link: let the original exception surface
+                    if not stopped and isinstance(e, Exception) and not isinstance(e, OSError):
+                        raise ObdMonitorStuck() from e
                     raise
                 if end.reason in ours:
-                    self._stop_monitor()
+                    end.at_prompt = self._stop_monitor()
+                elif end.reason != "prompt" and not self._await_prompt(self._rest, self.PROMPT_WAIT_S):
+                    end.at_prompt = self._stop_monitor()
             except OSError as e:
                 raise ObdNoAdapter(f"The adapter connection dropped: {e}.") from e
-        if end.reason in ours:
+        if end.reason in ours and end.at_prompt:
             self._resync()
         return end
 
@@ -120,16 +133,16 @@ class SerialTransport(Transport):
                 return StreamEnd("silent", tail)
             buf += self._ser.read(max(1, self._ser.in_waiting or 0))
             *lines, buf = buf.split(b"\r")
-            for raw in lines:
+            for i, raw in enumerate(lines):
                 line = raw.decode("ascii", errors="replace").strip()
                 if not line or line == norm:
                     continue
-                if "BUFFER FULL" in line:
-                    return StreamEnd("buffer_full")
-                if "LV RESET" in line or line.startswith(("ELM327", "STN")):
-                    return StreamEnd("reset")
-                if line == ">":
-                    return StreamEnd("prompt")
+                ended = ("buffer_full" if "BUFFER FULL" in line
+                         else "reset" if "LV RESET" in line or line.startswith(("ELM327", "STN"))
+                         else "prompt" if line == ">" else "")
+                if ended:
+                    self._rest = b"\r".join(lines[i + 1:] + [buf])   # the prompt may already be in here
+                    return StreamEnd(ended)
                 last_line = time.monotonic()
                 on_line(time.time(), line)
                 if stop.is_set():
@@ -137,12 +150,19 @@ class SerialTransport(Transport):
             if buf.strip() == b">":
                 return StreamEnd("prompt")
 
-    def _stop_monitor(self, timeout: float = 2.0) -> None:
-        """One space stops monitoring; wait for the prompt. Caller holds the lock."""
-        self._ser.write(b" ")
-        buf, deadline = b"", time.monotonic() + timeout
-        while b">" not in buf and time.monotonic() < deadline:
+    def _await_prompt(self, buf: bytes, timeout: float) -> bool:
+        """Read until the prompt, for at most `timeout` seconds. True if it came. Caller holds the lock."""
+        deadline = time.monotonic() + timeout
+        while b">" not in buf:
+            if time.monotonic() >= deadline:
+                return False
             buf += self._ser.read(max(1, self._ser.in_waiting or 0))
+        return True
+
+    def _stop_monitor(self) -> bool:
+        """One space stops monitoring; wait for the prompt. True if it came. Caller holds the lock."""
+        self._ser.write(b" ")
+        return self._await_prompt(b"", self.STOP_WAIT_S)
 
     def _resync(self) -> None:
         """Confirm the adapter is back to normal: ATI answers with ELM327 (a stray space can draw one '?')."""

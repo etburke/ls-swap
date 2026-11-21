@@ -143,3 +143,26 @@ def test_logging_transport_logs_stream_start_and_end_but_not_frames(tmp_path):
     assert end.reason == "time" and len(got) == 2
     assert ">> ATMA" in text and "watch stream started" in text
     assert "watch stream ended (time, 2 lines)" in text and "0C9" not in text
+
+
+def test_logging_transport_logs_the_stream_end_for_any_exception(tmp_path):
+    class Breaks(SimTransport):
+        def stream(self, cmd, on_line, stop, max_seconds, silence_s=1.0):
+            on_line(0.0, "1A1 2 01 02")
+            raise RuntimeError("decoder bug")
+    log = make(tmp_path)
+    t = LoggingTransport(Breaks(), log)
+    with pytest.raises(RuntimeError):
+        t.stream("ATMA", lambda ts, l: None, threading.Event(), max_seconds=1)
+    text = log.path.read_text()
+    assert "RuntimeError: decoder bug" in text and "watch stream ended (error, 1 lines)" in text
+
+
+def test_logging_transport_notes_a_stream_that_ended_without_a_prompt(tmp_path):
+    class NoPrompt(SimTransport):
+        def stream(self, cmd, on_line, stop, max_seconds, silence_s=1.0):
+            from crank.obd.transport import StreamEnd
+            return StreamEnd("time", at_prompt=False)
+    log = make(tmp_path)
+    LoggingTransport(NoPrompt(), log).stream("ATMA", lambda ts, l: None, threading.Event(), max_seconds=1)
+    assert "watch stream ended (time, 0 lines, no prompt after the stop byte)" in log.path.read_text()

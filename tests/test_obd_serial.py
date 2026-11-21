@@ -275,15 +275,15 @@ def test_adapter_returning_to_the_prompt_ends_with_reason_prompt():
 
 
 def test_reset_banner_mid_stream_ends_with_reason_reset():
-    f, t = _mon([b"0C9 8 00\r", b"\rELM327 v1.4b\r"])
+    f, t = _mon([b"0C9 8 00\r", b"\rELM327 v1.4b\r\r>"])          # a reset ends at its own prompt
     end = t.stream("ATMA", lambda ts, line: None, threading.Event(), max_seconds=1)
-    assert end.reason == "reset" and b" " not in f.written
+    assert end.reason == "reset" and end.at_prompt and b" " not in f.written
 
 
 def test_lv_reset_line_ends_with_reason_reset():
-    f, t = _mon([b"LV RESET\r"])
+    f, t = _mon([b"LV RESET\r", b"\rELM327 v1.4b\r\r>"])
     end = t.stream("ATMA", lambda ts, line: None, threading.Event(), max_seconds=1)
-    assert end.reason == "reset" and b" " not in f.written
+    assert end.reason == "reset" and end.at_prompt and b" " not in f.written
 
 
 def test_silence_ends_the_stream_with_reason_silent():
@@ -361,3 +361,71 @@ def test_link_drop_with_a_failing_stop_write_still_raises_no_adapter():
     f.write = write
     with pytest.raises(ObdNoAdapter):
         t.stream("ATMA", lambda ts, line: None, threading.Event(), max_seconds=1)
+
+
+def test_send_refuses_a_monitor_command_so_only_stream_can_start_monitoring():
+    f = FakeSerial()
+    t = make(f); t.open()
+    before = len(f.written)
+    with pytest.raises(ObdForbiddenCommand, match="use stream"):
+        t.send("ATMA")
+    assert len(f.written) == before
+
+
+def test_buffer_full_reads_on_to_the_prompt_that_follows():
+    f, t = _mon([b"0C9 8 00\rBUFFER FULL\r", b"\r", b">"])
+    t.PROMPT_WAIT_S = 0.5
+    end = t.stream("ATMA", lambda ts, line: None, threading.Event(), max_seconds=1)
+    assert end.reason == "buffer_full" and end.at_prompt and b" " not in f.written
+    assert f.queue == []                                     # the prompt was read, not left for the next command
+
+
+def test_buffer_full_without_a_prompt_sends_the_stop_byte():
+    f, t = _mon([b"0C9 8 00\rBUFFER FULL\r"])
+    t.PROMPT_WAIT_S = 0.2
+    end = t.stream("ATMA", lambda ts, line: None, threading.Event(), max_seconds=1)
+    assert end.reason == "buffer_full" and end.at_prompt
+    assert f.written.count(b" ") == 1 and b"\r" not in f.written
+
+
+def test_reset_banner_then_no_prompt_sends_the_stop_byte():
+    f, t = _mon([b"0C9 8 00\r", b"\rELM327 v1.4b\r"])
+    t.PROMPT_WAIT_S = 0.2
+    end = t.stream("ATMA", lambda ts, line: None, threading.Event(), max_seconds=1)
+    assert end.reason == "reset" and end.at_prompt and f.written.count(b" ") == 1
+
+
+def _stuck(chunks):
+    """A port whose monitor never answers the stop byte with a prompt."""
+    replies = {"": [], "ATI": [b"ELM327 v1.4b\r\r>"]}
+    f = FakeSerial(on_write=lambda k: replies.get(k, [b"OK\r\r>"]) if k != "ATMA" else [], stream_chunks=chunks)
+    t = make(f)
+    t.open()
+    t.PROMPT_WAIT_S = t.STOP_WAIT_S = 0.1
+    return f, t
+
+
+def test_an_adapter_that_never_leaves_monitor_mode_is_reported_not_resynced():
+    f, t = _stuck([b"0C9 8 00\r"])
+    end = t.stream("ATMA", lambda ts, line: None, threading.Event(), max_seconds=0.2)
+    assert end.reason in ("time", "silent") and end.at_prompt is False
+    assert f.written[-2:] == [b"ATMA\r", b" "]               # nothing sent into a live monitor after the stop byte
+    assert b"\r" not in f.written
+
+
+def test_buffer_full_with_no_prompt_even_after_the_stop_byte_is_reported():
+    f, t = _stuck([b"0C9 8 00\rBUFFER FULL\r"])
+    end = t.stream("ATMA", lambda ts, line: None, threading.Event(), max_seconds=1)
+    assert end.reason == "buffer_full" and end.at_prompt is False and f.written[-1] == b" "
+
+
+def test_cancel_with_an_adapter_stuck_in_monitor_mode_raises_monitor_stuck():
+    from crank.obd.errors import ObdMonitorStuck
+    f, t = _stuck([b"0C9 8 00\r"])
+    t.cancel = threading.Event()
+
+    def on_line(ts, line):
+        t.cancel.set()
+    with pytest.raises(ObdMonitorStuck) as info:
+        t.stream("ATMA", on_line, threading.Event(), max_seconds=1)
+    assert isinstance(info.value.__cause__, ObdCancelled)

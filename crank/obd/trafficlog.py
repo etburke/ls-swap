@@ -112,11 +112,12 @@ class LoggingTransport(DelegatingTransport):
         self.log.event("watch stream started", tag)
         try:
             end = self.inner.stream(cmd, counted, stop, max_seconds, silence_s)
-        except ObdError as e:
+        except BaseException as e:                    # an adapter error, or a bug in on_line: the end is logged either way
             self.log.error(e, tag)
             self.log.event(f"watch stream ended (error, {count[0]} lines)", tag)
             raise
-        self.log.event(f"watch stream ended ({end.reason}, {count[0]} lines)", tag)
+        stuck = "" if getattr(end, "at_prompt", True) else ", no prompt after the stop byte"
+        self.log.event(f"watch stream ended ({end.reason}, {count[0]} lines{stuck})", tag)
         return end
 
     def close(self) -> None:

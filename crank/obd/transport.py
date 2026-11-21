@@ -16,9 +16,11 @@ from .protocol import request
 
 @dataclass
 class StreamEnd:
-    """Why a stream ended: stopped | time | silent | prompt | buffer_full | reset. `tail` is any unfinished line."""
+    """Why a stream ended: stopped | time | silent | prompt | buffer_full | reset. `tail` is any unfinished line.
+    `at_prompt` is False when the adapter never showed its prompt afterwards: it may still be monitoring."""
     reason: str
     tail: str = ""
+    at_prompt: bool = True
 
 
 class Transport:

@@ -96,8 +96,8 @@ class Controller:
                 with link.lock:
                     link.capture_id = j.saved_id
                     if link.watch_id:                      # the watch was saved first
-                        sess.link_watch(link.watch_id, j.saved_id)
                         link.watch.meta["capture_id"] = j.saved_id
+                        self._write_link(sess, link.watch, j.saved_id)
                     case.append_capture(j.saved_id, label, j.analysis, sim, watch_id=link.watch_id)
 
             def before_arm(j: CaptureJob) -> str | None:
@@ -150,6 +150,20 @@ class Controller:
         return None
 
     @staticmethod
+    def _write_link(sess, job: WatchJob, capture_id: str) -> None:
+        """Write the cross-reference into both metadata files. A disk error is noted in the watch's meta (and
+        so in its case event when that is written later); it never stops the case events being written."""
+        try:
+            sess.link_watch(job.meta["id"], capture_id)
+        except Exception as e:
+            job.meta["notes"].append(f"the link to capture {capture_id} could not be written: "
+                                     f"{type(e).__name__}: {e}")
+            try:
+                job.writer.finish(job.meta)
+            except Exception:
+                pass
+
+    @staticmethod
     def _did_not_save(cap: CaptureJob) -> str:
         return f"linked capture did not save: {cap.message}"
 
@@ -163,9 +177,12 @@ class Controller:
                 meta["capture_id"] = link.capture_id
             elif not cap.running and cap.saved_id is None:
                 meta["notes"].append(self._did_not_save(cap))
-            job.writer.finish(meta)                        # rewrite the meta with the trigger time and note
             if link.capture_id:
-                sess.link_watch(meta["id"], link.capture_id)
+                self._write_link(sess, job, link.capture_id)
+            try:
+                job.writer.finish(meta)                    # rewrite the meta with the trigger time and notes
+            except Exception as e:
+                meta["notes"].append(f"the watch metadata could not be rewritten: {type(e).__name__}: {e}")
             case.append_watch(meta)
 
     def _capture_ended(self, cap: CaptureJob, link: _CaptureLink) -> None:
@@ -232,6 +249,13 @@ class Controller:
             return self._obd_lock.acquire(timeout=3.0)
         return False
 
+    WATCHING = "An OBD watch is running; wait for it or stop it first."
+
+    def _busy(self, default: str) -> str:
+        """Why the read lock is taken: a watch, or `default` (a read)."""
+        w = self.watch_job
+        return self.WATCHING if w and w.running else default
+
     DROPPED = ("The adapter connection dropped. Press Relink, or Disconnect to read without a standing "
                "connection.")
 
@@ -242,7 +266,7 @@ class Controller:
 
         The lock is held until the job ends, so a second read from the phone or another tab is refused."""
         if not self._take_obd_lock():
-            return "An OBD read is already running."
+            return self._busy("An OBD read is already running.")
         started = False
         try:
             conn = self.connection
@@ -352,8 +376,14 @@ class Controller:
 
             def finished() -> None:
                 try:
-                    if job.restore_failed or job._reset:    # the adapter may have lost its settings
+                    # Like a read: anything but a clean end leaves the adapter's state unknown.
+                    if (job.restore_failed or job.reset or job.interrupted or job.error is not None
+                            or job.cancel_event.is_set() or job.outcome == "error"):
                         conn.mark_cold()
+                    e = job.error
+                    if isinstance(e, ObdVehicleSilent) or (
+                            isinstance(e, ObdAdapterError) and e.kind in ("UNABLE TO CONNECT", "BUS INIT")):
+                        conn.note_vehicle(False)
                     self.traffic.event(f"watch ended ({mode}, {(job.meta or {}).get('end_reason') or 'nothing kept'})")
                 finally:
                     self._obd_lock.release()
@@ -413,20 +443,24 @@ class Controller:
         finally:
             self._obd_lock.release()
 
-    def disconnect(self) -> None:
+    def disconnect(self) -> str | None:
+        """Close the standing connection. Returns why it could not (a read or watch is running), else None."""
         if not self._take_obd_lock():
-            return
+            return self._busy("A read is running; wait for it or cancel it first.")
         try:
             self.connection.disconnect()
         finally:
             self._obd_lock.release()
+        return None
 
     def relink(self) -> str | None:
         """Close the connection and open it again with the same source."""
         source = self.connection.source
         if not source:
             return "Nothing to relink. Press Connect."
-        self.disconnect()
+        err = self.disconnect()
+        if err:
+            return err
         if self.connection.state not in ("disconnected",):
             return "A read is running; wait for it or cancel it first."
         return self.connect(source)

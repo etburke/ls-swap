@@ -22,8 +22,9 @@ class Decoder:
     decode: Callable[[bytes], float | None]
 
 
-# 3 hex ID chars, 1 DLC digit (classic CAN: 0-8), then the data; spaces optional.
-_LINE = re.compile(r"([0-9A-F]{3})\s*([0-8])\s*((?:[0-9A-F]{2}\s*)*)")
+# 3 hex ID chars, 1 DLC digit (classic CAN: 0-8), then the data; spaces optional. ASCII only: in unicode
+# mode \s also matches the control bytes \x1c-\x1f, which bytes.fromhex rejects.
+_LINE = re.compile(r"([0-9A-F]{3})\s*([0-8])\s*((?:[0-9A-F]{2}\s*)*)", re.ASCII)
 
 
 def parse_line(text: str) -> Frame | None:
@@ -31,7 +32,10 @@ def parse_line(text: str) -> Frame | None:
     if m is None:
         return None
     can_id, dlc, hex_data = m.group(1), int(m.group(2)), m.group(3)
-    data = bytes.fromhex(hex_data)
+    try:
+        data = bytes.fromhex(hex_data)
+    except ValueError:                                 # never let one odd line end a watch
+        return None
     if len(data) != dlc:
         return None
     return Frame(can_id, dlc, data)

@@ -82,7 +82,7 @@ def test_watch_blocks_reads_and_a_second_watch(tmp_path):
     c = ctl(tmp_path)
     assert c.start_watch("raw", 5.0) is None
     assert c.watch_job.monitoring.wait(3)
-    assert c.start_obd("x") == "An OBD read is already running."
+    assert c.start_obd("x") == "An OBD watch is running; wait for it or stop it first."   # was the read text
     assert c.start_watch("raw", 1.0) == BUSY
     assert "read is running" in c.connect("healthy")
     c.stop_watch()
@@ -344,4 +344,85 @@ def test_capture_failing_after_its_watch_saved_still_notes_the_watch(tmp_path, m
     assert watch.meta["notes"].count(note) == 1
     [wmeta] = c.case().session.list_watches()
     assert wmeta["notes"].count(note) == 1 and wmeta["capture_id"] is None
+    c.disconnect()
+
+
+# the connection after a watch, refusals while one runs, and link write failures
+
+def test_a_cancelled_watch_leaves_the_connection_cold(tmp_path):
+    c = ctl(tmp_path)
+    assert c.start_watch("raw", 5.0) is None
+    assert c.watch_job.monitoring.wait(3)
+    c.cancel_watch()
+    assert finish(c).state == "cancelled" and c.connection.cold and lock_is_free(c)
+    c.disconnect()
+
+
+def test_a_watch_that_fails_leaves_the_connection_cold(tmp_path):
+    from crank.obd.errors import ObdTimeout
+    c = ctl(tmp_path)
+
+    def broken(*a, **kw):
+        raise ObdTimeout("The adapter did not answer.")
+    c.connection._inner.stream = broken
+    assert c.start_watch("raw", 1.0) is None
+    job = finish(c)
+    assert job.state == "error" and c.connection.cold and lock_is_free(c)
+    c.disconnect()
+
+
+def test_a_silent_vehicle_is_noted_on_the_connection(tmp_path):
+    c = ctl(tmp_path)
+    c.connection._inner.sc.fault = "no_vehicle"
+    assert c.start_watch("raw", 1.0) is None
+    job = finish(c)
+    assert job.message == "The vehicle did not answer. Is the key on?"
+    assert c.connection.vehicle == "no answer" and c.connection.cold
+    c.connection._inner.sc.fault = None
+    c.disconnect()
+
+
+def test_controller_reads_the_public_reset_flag():
+    import inspect
+
+    import crank.controller as controller
+    from crank.obd.watch import WatchJob
+    assert isinstance(WatchJob.reset, property)
+    assert "job._reset" not in inspect.getsource(controller)
+
+
+def test_a_read_or_disconnect_during_a_watch_says_a_watch_is_running(tmp_path):
+    c = ctl(tmp_path)
+    assert c.start_watch("raw", 5.0) is None
+    assert c.watch_job.monitoring.wait(3)
+    msg = "An OBD watch is running; wait for it or stop it first."
+    assert c.start_obd("x") == msg
+    assert c.disconnect() == msg and c.connection.state == "connected"
+    c.stop_watch()
+    finish(c)
+    assert c.disconnect() is None and c.connection.state == "disconnected"
+
+
+@pytest.mark.parametrize("watch_first", [False, True])
+def test_a_failing_link_write_never_drops_the_case_events(tmp_path, monkeypatch, watch_first):
+    from crank.store import Session
+
+    def broken(self, wid, capture_id):
+        raise OSError("disk full")
+    monkeypatch.setattr(Session, "link_watch", broken)
+    c = linked(tmp_path)
+    if watch_first:
+        real_fetch = SimScope.fetch
+
+        def slow_fetch(self, s):
+            c.stop_watch()
+            wait_for(lambda: not c.watch_job.running, 5.0)
+            return real_fetch(self, s)
+        monkeypatch.setattr(SimScope, "fetch", slow_fetch)
+    assert c.arm("x", watch=True) is None
+    cap, watch = finish_capture(c), finish(c)
+    assert cap.state == "done" and lock_is_free(c)
+    evs = {e.type: e for e in c.case().events()}
+    assert set(evs) == {"capture", "watch"}
+    assert any("disk full" in n for n in watch.meta["notes"])
     c.disconnect()
