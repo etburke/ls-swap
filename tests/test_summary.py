@@ -47,6 +47,40 @@ def test_describe_poll_watch_says_official(tmp_path):
     assert s.timeline[-1]["line"] == describe(ev)
 
 
+def test_describe_watch_includes_its_label_so_ai_watches_are_marked(tmp_path):
+    case = Case(SessionStore(tmp_path).open("c"))
+    ev = case.append_watch(_raw_meta(label="[AI] crank 1"))
+    assert describe(ev) == ("OBD watch 001 [SIMULATED]: [AI] crank 1 (raw CAN, 18.4 s): 1,512 frames from 3 IDs; "
+                            "engine speed (best-effort, ID 0C9) max 212 rpm")
+
+
+def test_a_linked_watch_that_ends_with_its_capture_did_not_stop_early(tmp_path):
+    case = Case(SessionStore(tmp_path).open("c"))
+    text = describe(case.append_watch(_raw_meta(end_reason="until")))
+    assert text.endswith("; ended with the linked capture") and "stopped early" not in text
+
+
+@pytest.mark.parametrize("watch_first", [True, False])
+def test_watch_and_capture_link_both_ways_whichever_saved_first(tmp_path, watch_first):
+    case = Case(SessionStore(tmp_path).open("c"))
+    d = generate("healthy", seconds=1.0)
+    if watch_first:                                   # the usual order on a real scope: no capture id yet
+        case.append_watch(_raw_meta(id="004", capture_id=None))
+        cid = case.session.add_capture(d, "crank")
+        case.append_capture(cid, "crank", analyze_capture(d), True, watch_id="004")
+    else:
+        cid = case.session.add_capture(d, "crank")
+        case.append_capture(cid, "crank", analyze_capture(d), True)
+        case.append_watch(_raw_meta(id="004", capture_id=cid))
+    s = build_summary(case)
+    assert s.watches[0]["capture_id"] == cid
+    assert s.captures[0]["watch_id"] == "004"
+    from crank.render import to_html, to_markdown
+    md, html = to_markdown(s), to_html(s)
+    for out in (md, html):
+        assert f"(linked to capture {cid})" in out and "linked to OBD watch 004" in out
+
+
 @pytest.fixture
 def case(tmp_path):
     return Case(SessionStore(tmp_path).open("c"))

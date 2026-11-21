@@ -52,6 +52,10 @@ def _cap_line(c: dict) -> str:
     return f"{_cap_head(c)}: {_cap_tail(c)}"
 
 
+def _cap_watch(c: dict) -> str:
+    return f" (linked to OBD watch {c['watch_id']})" if c.get("watch_id") else ""
+
+
 def _code(c: dict) -> str:
     ecu = f", {c['ecu']}" if c.get("show_ecu") and c.get("ecu") else ""
     st_ = f" ({c['status']}{ecu})" if c.get("status") else ""
@@ -114,7 +118,7 @@ def to_markdown(s: Summary) -> str:
     if s.freeze_frame:
         out.append("- " + _md(_freeze(s.freeze_frame)))
     out += [f"- {_md(_measure(m))}" for m in s.measurements]
-    out += [f"- Capture {_md(_cap_line(c))}" for c in s.captures]
+    out += [f"- Capture {_md(_cap_line(c) + _cap_watch(c))}" for c in s.captures]
     if not (s.codes or s.measurements or s.captures):
         out.append(f"- {NOT_RECORDED}")
     if s.watches:
@@ -180,7 +184,7 @@ def _li(items) -> str:
 def _cap_html(c: dict, svg: str = "") -> str:
     sim = ' <span class="sim">SIMULATED</span>' if c["sim"] else ""
     return (f'<div class="card"><b>{escape(c["id"])} {escape(c["label"] or "unlabeled")}</b>{sim}'
-            f'<br>{escape(_cap_tail(c))}{svg}</div>')
+            f'<br>{escape(_cap_tail(c) + _cap_watch(c))}{svg}</div>')
 
 
 def to_html(s: Summary, plots: dict | None = None) -> str:
