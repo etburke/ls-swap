@@ -144,6 +144,102 @@ def obd_panel(ctrl, source, key: str, label: str, full_width: bool = False) -> N
         st.error(job.message)
 
 
+WATCH_MODES = {"Raw CAN (default)": "raw", "Poll RPM": "poll"}
+
+
+def _watch_results(ctrl, job) -> None:
+    """The finished watch: its one-line summary, RPM over time and the ID inventory (never claims more than
+    best-effort for decoded CAN values)."""
+    import pandas as pd
+    from crank.summary import describe
+    meta = job.meta
+    if not meta:
+        return
+    for e in ctrl.case().events():
+        if e.type == "watch" and e.refs.get("watch") == meta["id"]:
+            st.success(describe(e))
+            break
+    _, rows = ctrl.store.open(job.session_name).load_watch(meta["id"])
+    t0 = meta.get("started") or 0.0
+    if meta["mode"] == "poll":
+        points = [(r["t"] - t0, r["value"]) for r in rows if r.get("cmd") == "010C" and r.get("value") is not None]
+        name = "RPM, 010C (official)"
+    else:
+        points = [(r["t"] - t0, d["value"]) for r in rows for d in r.get("decoded", [])
+                  if d["name"] == "Engine speed"]
+        name = "Engine speed rpm (best-effort)"
+    if points:
+        st.line_chart(pd.DataFrame({"s": [p[0] for p in points], name: [p[1] for p in points]}), x="s", y=name)
+        caption = "Seconds from the start of recording."
+        if meta.get("trigger_t"):
+            caption += f" Scope trigger at {meta['trigger_t'] - t0:.2f} s."
+        st.caption(caption)
+    else:
+        st.caption("No engine speed values were seen.")
+    ids = (meta.get("summary") or {}).get("ids") or {}
+    if ids:
+        st.caption("CAN IDs seen")
+        st.dataframe(pd.DataFrame([{"ID": i, "Frames": v["count"], "Hz": v["hz"]} for i, v in ids.items()]),
+                     hide_index=True)
+
+
+def watch_panel(ctrl, key: str, compact: bool = False) -> None:
+    """Start, Stop (keep) and Cancel for an OBD watch, its running indicator, and (not compact) its result."""
+    job = ctrl.watch_job
+    running = bool(job and job.running)
+    status = ctrl.connection_status()
+    reason = "" if status["state"] == "connected" else "Connect to the adapter first."
+    mode = WATCH_MODES[st.selectbox("Watch mode", list(WATCH_MODES), key=f"{key}_mode", disabled=running)]
+    seconds = st.number_input("Seconds", 1, 120, 20, key=f"{key}_seconds", disabled=running)
+    if reason:
+        st.caption(reason)
+    st.caption("Raw CAN decodes are best-effort guesses; poll RPM (010C) is the official PID.")
+    if st.button("Start watch", key=f"{key}_start", use_container_width=compact,
+                 disabled=running or bool(reason)):
+        err = ctrl.start_watch(mode, float(seconds))
+        if err:
+            st.error(err)
+            return
+        job = ctrl.watch_job
+        job.join(0.3)
+    if job is None or job.session_name != ctrl.session_name:
+        return
+    if job.running:
+        if job.mode == "poll":
+            count = f"{job.lines} lines"
+            rpm = "" if job.latest_rpm is None else f" · latest RPM 010C (official) {job.latest_rpm:,.0f} rpm"
+        else:
+            count = f"{job.frames} frames"
+            rpm = "" if job.latest_rpm is None else f" · latest engine speed {job.latest_rpm:,.0f} rpm (best-effort)"
+        st.info(f"Watching… {job.seconds:.0f} s · {count}{rpm}")
+        if job.linked:                               # monitoring starts before the scope is even configured
+            st.info("Linked to the capture: crank when the capture says Armed")
+        elif job.monitoring.is_set():
+            st.warning("**Recording — crank now**")
+        c1, c2 = st.columns(2)
+        if c1.button("Stop (keep)", key=f"{key}_stop", use_container_width=True):
+            ctrl.stop_watch()
+            job.join(3.0)
+        if c2.button("Cancel", key=f"{key}_cancel", use_container_width=True):
+            ctrl.cancel_watch()
+            job.join(3.0)
+        if job.running:
+            refresh = float(os.environ.get("CRANK_REMOTE_REFRESH_S", "1"))
+            if refresh > 0:
+                time.sleep(refresh)
+                st.rerun()
+            return
+    if job.state in ("done", "stopped"):
+        if compact:
+            st.success("Watch recorded in the case.")
+        else:
+            _watch_results(ctrl, job)
+    elif job.state == "cancelled":
+        st.warning(job.message or "Watch cancelled; nothing was recorded.")
+    elif job.state == "error":
+        st.error(job.message)
+
+
 def _obd():
     st.subheader("Read from the vehicle (OBD-II)")
     st.caption("A read adds the codes, freeze frame and live values to the case; it never clears codes. "
@@ -155,6 +251,8 @@ def _obd():
     else:
         source = pick_obd_source("obd")
     obd_panel(ctrl, source, "obd_read", "Read from OBD")
+    st.subheader("Watch the PCM (OBD-II)")
+    watch_panel(ctrl, "obd_watch")
 
 
 def _board(case, last_codes):

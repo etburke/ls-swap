@@ -18,9 +18,9 @@ HOST = "127.0.0.1"
 TOOL_NAMES = (
     "list_sessions", "get_status", "get_capture_progress", "obd_progress", "get_obd_log",
     "get_case_summary", "get_case_report", "list_captures", "get_capture_analysis", "get_capture_signal",
-    "compare_captures", "reanalyze_capture",
+    "compare_captures", "reanalyze_capture", "watch_progress", "list_watches", "get_watch",
     "arm_capture", "cancel_capture", "obd_connect", "obd_disconnect", "obd_relink", "obd_read", "obd_stop",
-    "obd_cancel", "add_case_note", "set_suspect",
+    "obd_cancel", "obd_watch", "obd_watch_stop", "obd_watch_cancel", "add_case_note", "set_suspect",
 )
 
 INSTRUCTIONS = """\
@@ -31,7 +31,8 @@ strong it is, and say "insufficient data" when it is. Simulated data is flagged 
 evidence about the vehicle. Read tools always work. arm_capture, the obd_* control tools, add_case_note and
 set_suspect only work while the owner has switched on "Allow AI control". Arming only arms: in real-scope mode
 tell the owner to crank the engine. Everything you add to the case is marked as AI-authored; only record what
-was actually observed or done."""
+was actually observed or done.
+OBD watch values decoded from raw CAN frames are best-effort (community-documented layouts) and are labelled so; treat them as what the PCM broadcast, not as verified fact. Polled 010C RPM is official OBD data."""
 
 
 @dataclass

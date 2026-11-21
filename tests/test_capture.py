@@ -97,3 +97,45 @@ def test_no_hook_call_when_nothing_was_saved():
                    save=lambda d: "001", on_done=seen.append)
     j.start(); j.join(5)
     assert j.state == "error" and seen == []
+
+
+class SpyScope(SimScope):
+    def __init__(self, calls, **kw):
+        super().__init__("healthy", **kw)
+        self.calls = calls
+
+    def configure(self, s):
+        self.calls.append("configure")
+        super().configure(s)
+
+    def arm(self):
+        self.calls.append("arm")
+        super().arm()
+
+
+def test_before_arm_runs_before_the_scope_is_configured():
+    calls, seen = [], []
+
+    def before_arm(job):
+        seen.append((job.state, job.message))
+        calls.append("hook")
+        time.sleep(0.1)
+        seen.append(time.time())
+        return "The vehicle did not answer. Is the key on?"
+    j = _job(SpyScope(calls), before_arm=before_arm)
+    assert j.started_at >= seen.pop()                 # the trigger countdown starts after the watch is up
+    assert seen == [("preparing", "Starting the OBD watch…")]
+    assert calls == ["hook", "configure", "arm"]
+    assert j.state == "done" and j.note == "The vehicle did not answer. Is the key on?"
+    assert j.triggered_at is not None and j.started_at <= j.triggered_at <= time.time()
+
+
+def test_cancel_during_preparing_never_touches_the_scope():
+    calls = []
+
+    def before_arm(job):
+        job.cancel()
+        return None
+    j = _job(SpyScope(calls), before_arm=before_arm)
+    assert j.state == "cancelled" and calls == [] and j.note == ""
+    assert j.triggered_at is None and not j.running

@@ -4,6 +4,7 @@ import time
 import pytest
 
 from crank.obd import protocol as P
+from crank.obd.canframes import Frame, decode, parse_line
 from crank.obd.errors import ObdCancelled, ObdTimeout
 from crank.obd.transport import ADAPTERS, SCENARIOS, SimTransport
 
@@ -195,3 +196,66 @@ def test_heartbeat_drop_stops_answering_atrv_after_three():
         assert t.send("ATRV").strip() == "12.4V"
     with pytest.raises(ObdTimeout):
         t.send("ATRV")
+
+
+def _watch(name, seconds, cmd="ATMA"):
+    t = SimTransport(name)
+    t.open()
+    lines = []
+    end = t.stream(cmd, lambda ts, l: lines.append((ts, l)), threading.Event(), max_seconds=seconds)
+    rpms = [r for _, l in lines for _, r in decode(parse_line(l) or Frame("", 0, b""))]
+    return t, lines, end, rpms
+
+
+def test_cranking_rpm_seen_streams_0c9_rising_then_falling():
+    _, lines, end, rpms = _watch("cranking_rpm_seen", 1.6)
+    assert end.reason == "time" and rpms[0] == 0 and 150 <= max(rpms) <= 250 and rpms[-1] == 0
+    assert all(parse_line(l) is not None and " " not in l for _, l in lines)
+    ids = {parse_line(l).can_id for _, l in lines}
+    assert {"0C9", "1A1", "3C1"} <= ids
+
+
+def test_cranking_no_rpm_never_decodes_above_zero():
+    _, lines, end, rpms = _watch("cranking_no_rpm", 0.8)
+    assert end.reason == "time" and rpms and max(rpms) == 0
+    assert {parse_line(l).can_id for _, l in lines} >= {"1A1", "3C1"}
+
+
+def test_monitor_overflow_ends_with_buffer_full():
+    _, _, end, _ = _watch("monitor_overflow", 3)
+    assert end.reason == "buffer_full"
+
+
+def test_reset_mid_watch_ends_with_reset_and_forgets_headers():
+    t = SimTransport("reset_mid_watch")
+    t.open()
+    t.send("ATH1")
+    t.send("010C")
+    assert t.headers and t.searched
+    end = t.stream("ATMA", lambda ts, l: None, threading.Event(), max_seconds=3)
+    assert end.reason == "reset" and not t.headers and not t.searched
+
+
+def test_stream_stops_on_event_and_refuses_other_commands():
+    t = SimTransport("cranking_rpm_seen")
+    t.open()
+    stop = threading.Event()
+    threading.Timer(0.1, stop.set).start()
+    assert t.stream("ATMA", lambda ts, l: None, stop, max_seconds=3).reason == "stopped"
+    with pytest.raises(Exception):
+        t.stream("ATSH7E0", lambda ts, l: None, threading.Event(), max_seconds=1)
+
+
+def test_existing_scenarios_010C_unchanged():
+    t = sim("healthy", headers=False)
+    assert t.send("010C") == "410C0BB8"
+
+
+def test_poll_010C_follows_the_crank_curve_in_cranking_rpm_seen():
+    t = sim("cranking_rpm_seen", headers=False)
+    assert t.send("010C") == "410C0000"
+    time.sleep(0.5)
+    raw = int(t.send("010C")[4:], 16)
+    assert 180 <= raw / 4 <= 220
+    assert int(sim("cranking_no_rpm", headers=False).send("010C")[4:], 16) == 0
+    assert sim("cranking_rpm_seen", headers=False).send("ATDPN") == "A6"

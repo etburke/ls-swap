@@ -4,7 +4,81 @@ from crank.analysis import analyze_capture
 from crank.case import Case, Vehicle
 from crank.sim import generate
 from crank.store import SessionStore
-from crank.summary import NOT_RECORDED, build_summary
+from crank.summary import NOT_RECORDED, build_summary, describe
+
+
+def _raw_meta(**kw):
+    m = {"id": "001", "label": "", "mode": "raw", "sim": True, "seconds": 18.4, "end_reason": "time",
+         "notes": [], "capture_id": None,
+         "summary": {"lines": 1512, "frames": 1512, "max_gap_s": 0.02,
+                     "ids": {"0C9": {"count": 900, "hz": 50.0}, "1A1": {"count": 400, "hz": 20.0},
+                             "3C1": {"count": 212, "hz": 10.0}},
+                     "engine_speed": {"decoder": "0C9-engine-speed-v1: bytes[1:3] BE x0.25", "best_effort": True,
+                                      "samples": 900, "max": 212.25, "median_nonzero": 180.0,
+                                      "first_nonzero_s": 2.0}}}
+    m.update(kw)
+    return m
+
+
+def test_describe_raw_watch_says_best_effort_and_sim(tmp_path):
+    case = Case(SessionStore(tmp_path).open("c"))
+    ev = case.append_watch(_raw_meta())
+    assert describe(ev) == ("OBD watch 001 [SIMULATED] (raw CAN, 18.4 s): 1,512 frames from 3 IDs; "
+                            "engine speed (best-effort, ID 0C9) max 212 rpm")
+    meta = _raw_meta(id="002", sim=False, end_reason="buffer_full")
+    meta["summary"] = {**meta["summary"], "engine_speed": None}
+    text = describe(case.append_watch(meta))
+    assert text.startswith("OBD watch 002 (raw CAN, 18.4 s): 1,512 frames from 3 IDs; no engine speed frames seen")
+    assert "; stopped early: " in text and "SIMULATED" not in text
+
+
+def test_describe_poll_watch_says_official(tmp_path):
+    case = Case(SessionStore(tmp_path).open("c"))
+    ev = case.append_watch({"id": "002", "mode": "poll", "sim": False, "seconds": 20.0, "end_reason": "time",
+                            "notes": [], "capture_id": None,
+                            "summary": {"samples": 180,
+                                        "rpm": {"source": "010C (official)", "answered": 180, "max": 0.0,
+                                                "median_nonzero": None, "first_nonzero_s": None},
+                                        "voltage": {"min": 9.8, "max": 12.1}}})
+    assert describe(ev) == ("OBD watch 002 (poll, 20.0 s): 180 RPM samples (010C, official), max 0 rpm; "
+                            "adapter voltage 9.8–12.1 V")
+    s = build_summary(case)
+    assert s.watches == [{"id": "002", "ts": ev.ts, "text": describe(ev), "sim": False, "capture_id": None}]
+    assert s.timeline[-1]["line"] == describe(ev)
+
+
+def test_describe_watch_includes_its_label_so_ai_watches_are_marked(tmp_path):
+    case = Case(SessionStore(tmp_path).open("c"))
+    ev = case.append_watch(_raw_meta(label="[AI] crank 1"))
+    assert describe(ev) == ("OBD watch 001 [SIMULATED]: [AI] crank 1 (raw CAN, 18.4 s): 1,512 frames from 3 IDs; "
+                            "engine speed (best-effort, ID 0C9) max 212 rpm")
+
+
+def test_a_linked_watch_that_ends_with_its_capture_did_not_stop_early(tmp_path):
+    case = Case(SessionStore(tmp_path).open("c"))
+    text = describe(case.append_watch(_raw_meta(end_reason="until")))
+    assert text.endswith("; ended with the linked capture") and "stopped early" not in text
+
+
+@pytest.mark.parametrize("watch_first", [True, False])
+def test_watch_and_capture_link_both_ways_whichever_saved_first(tmp_path, watch_first):
+    case = Case(SessionStore(tmp_path).open("c"))
+    d = generate("healthy", seconds=1.0)
+    if watch_first:                                   # the usual order on a real scope: no capture id yet
+        case.append_watch(_raw_meta(id="004", capture_id=None))
+        cid = case.session.add_capture(d, "crank")
+        case.append_capture(cid, "crank", analyze_capture(d), True, watch_id="004")
+    else:
+        cid = case.session.add_capture(d, "crank")
+        case.append_capture(cid, "crank", analyze_capture(d), True)
+        case.append_watch(_raw_meta(id="004", capture_id=cid))
+    s = build_summary(case)
+    assert s.watches[0]["capture_id"] == cid
+    assert s.captures[0]["watch_id"] == "004"
+    from crank.render import to_html, to_markdown
+    md, html = to_markdown(s), to_html(s)
+    for out in (md, html):
+        assert f"(linked to capture {cid})" in out and "linked to OBD watch 004" in out
 
 
 @pytest.fixture

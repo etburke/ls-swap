@@ -34,6 +34,38 @@ def _read_json(path: Path, default):
         return default
 
 
+_ID = re.compile(r"\d{3,}")
+
+
+class WatchWriter:
+    """One watch being recorded: rows go to NNN.jsonl as they arrive (flushed at least every 0.5 s, so a
+    crash keeps them); finish() writes the NNN.json meta, discard() removes both."""
+
+    FLUSH_S = 0.5
+
+    def __init__(self, folder: Path, wid: str):
+        self.id = wid
+        self._rows, self._meta = folder / f"{wid}.jsonl", folder / f"{wid}.json"
+        self._f = open(self._rows, "x", encoding="utf-8")
+        self._flushed = 0.0                          # the first row goes to disk at once
+
+    def record(self, row: dict) -> None:
+        self._f.write(json.dumps(row) + "\n")
+        now = time.monotonic()
+        if now - self._flushed >= self.FLUSH_S:
+            self._f.flush()
+            self._flushed = now
+
+    def finish(self, meta: dict) -> None:
+        self._f.close()
+        _write_json(self._meta, meta)
+
+    def discard(self) -> None:
+        self._f.close()
+        self._rows.unlink(missing_ok=True)
+        self._meta.unlink(missing_ok=True)
+
+
 class Session:
     def __init__(self, path: Path):
         self.path = path
@@ -64,6 +96,52 @@ class Session:
 
     def load_capture(self, cid: str) -> CaptureData:
         return CaptureData.load(str(self.path / "captures" / f"{cid}.npz"))
+
+    # OBD watches: watches/NNN.jsonl (rows) + watches/NNN.json (meta, written when the watch is kept)
+    def _watch_dir(self) -> Path:
+        return self.path / "watches"
+
+    def new_watch(self) -> WatchWriter:
+        folder = self._watch_dir()
+        folder.mkdir(exist_ok=True)
+        nums = [int(p.name.split(".")[0]) for p in folder.glob("*.json*") if _ID.fullmatch(p.name.split(".")[0])]
+        return WatchWriter(folder, f"{max(nums, default=0) + 1:03d}")
+
+    def list_watches(self) -> list[dict]:
+        folder = self._watch_dir()
+        if not folder.is_dir():
+            return []
+        metas = (_read_json(p, None) for p in sorted(folder.glob("*.json")) if _ID.fullmatch(p.stem))
+        return [m for m in metas if m]
+
+    def _watch_meta(self, wid: str) -> dict:
+        meta = _read_json(self._watch_dir() / f"{wid}.json", None) if _ID.fullmatch(wid) else None
+        if not meta:
+            raise KeyError(wid)
+        return meta
+
+    def load_watch(self, wid: str) -> tuple[dict, list[dict]]:
+        meta, rows = self._watch_meta(wid), []
+        try:
+            text = (self._watch_dir() / f"{wid}.jsonl").read_text(encoding="utf-8")
+        except FileNotFoundError:
+            text = ""
+        for line in text.splitlines():
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:                 # a line cut short by a crash
+                pass
+        return meta, rows
+
+    def link_watch(self, wid: str, capture_id: str) -> None:
+        meta = self._watch_meta(wid)
+        cap_path = self.path / "captures" / f"{capture_id}.json"
+        cap = _read_json(cap_path, None) if _ID.fullmatch(capture_id) else None
+        if not cap:
+            raise KeyError(capture_id)
+        meta["capture_id"], cap["watch_id"] = capture_id, wid
+        _write_json(self._watch_dir() / f"{wid}.json", meta)
+        _write_json(cap_path, cap)
 
     # manual readings from the guided procedure
     def readings(self) -> dict:

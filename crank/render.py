@@ -52,6 +52,10 @@ def _cap_line(c: dict) -> str:
     return f"{_cap_head(c)}: {_cap_tail(c)}"
 
 
+def _cap_watch(c: dict) -> str:
+    return f" (linked to OBD watch {c['watch_id']})" if c.get("watch_id") else ""
+
+
 def _code(c: dict) -> str:
     ecu = f", {c['ecu']}" if c.get("show_ecu") and c.get("ecu") else ""
     st_ = f" ({c['status']}{ecu})" if c.get("status") else ""
@@ -77,6 +81,12 @@ def _freeze(ff: dict) -> str:
 
 
 INFERRED = "(inferred from the order of events)"
+WATCH_NOTE = ("Engine speed from a raw CAN watch is best-effort decoding of what the PCM broadcast (ID 0C9, "
+              "unverified on this truck); a poll watch's RPM is the PCM's official 010C answer.")
+
+
+def _watch_line(w: dict) -> str:
+    return w["text"] + (f" (linked to capture {w['capture_id']})" if w.get("capture_id") else "")
 
 
 def to_markdown(s: Summary) -> str:
@@ -108,9 +118,11 @@ def to_markdown(s: Summary) -> str:
     if s.freeze_frame:
         out.append("- " + _md(_freeze(s.freeze_frame)))
     out += [f"- {_md(_measure(m))}" for m in s.measurements]
-    out += [f"- Capture {_md(_cap_line(c))}" for c in s.captures]
+    out += [f"- Capture {_md(_cap_line(c) + _cap_watch(c))}" for c in s.captures]
     if not (s.codes or s.measurements or s.captures):
         out.append(f"- {NOT_RECORDED}")
+    if s.watches:
+        out += ["", "## OBD watches"] + [f"- {_md(_watch_line(w))}" for w in s.watches] + ["", f"_{WATCH_NOTE}_"]
     if s.before_after:
         out += ["", "## Before and after"]
         for b in s.before_after:
@@ -172,7 +184,7 @@ def _li(items) -> str:
 def _cap_html(c: dict, svg: str = "") -> str:
     sim = ' <span class="sim">SIMULATED</span>' if c["sim"] else ""
     return (f'<div class="card"><b>{escape(c["id"])} {escape(c["label"] or "unlabeled")}</b>{sim}'
-            f'<br>{escape(_cap_tail(c))}{svg}</div>')
+            f'<br>{escape(_cap_tail(c) + _cap_watch(c))}{svg}</div>')
 
 
 def to_html(s: Summary, plots: dict | None = None) -> str:
@@ -209,6 +221,9 @@ def to_html(s: Summary, plots: dict | None = None) -> str:
         body.append("<h2>Key data</h2>" + (_li(data) or f"<p class='muted'>{NOT_RECORDED}</p>"))
         if s.captures:
             body.append('<div class="pair">' + "".join(_cap_html(c, plots.get(c["id"], "")) for c in s.captures) + "</div>")
+        if s.watches:
+            body.append("<h2>OBD watches</h2>" + _li(e(_watch_line(w)) for w in s.watches)
+                        + f"<p class='muted'>{e(WATCH_NOTE)}</p>")
         for b in s.before_after:
             body.append(f"<h2>Before and after: {e(b['change'])}"
                         f"{' <span class=muted>' + INFERRED + '</span>' if b['inferred'] else ''}</h2><div class='pair'>"
