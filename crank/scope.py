@@ -45,6 +45,12 @@ class ScopeInterface(ABC):
 CRITICAL = (":ACQuire:MDEPth", ":TIMebase", ":TRIGger", ":WAVeform:MODE", ":SINGle")
 
 
+def _same(got: str, want: str) -> bool:
+    """SCPI keyword match: the scope may answer in long form (POSitive) or short form (POS)."""
+    short = "".join(ch for ch in want if not ch.islower())
+    return got.strip().upper() in (want.upper(), short.upper())
+
+
 def _depth_value(text: str) -> float:
     """'10M' and '1.0E+7' both mean ten million points."""
     t = text.strip().upper()
@@ -95,6 +101,13 @@ class RigolScope(ScopeInterface):
             errs.append(e)
         return errs
 
+    def _try(self, cmd: str) -> None:
+        """Send a command whose rejection is logged but never stops the capture."""
+        self.i.write(cmd)
+        errs = self.drain_errors()
+        if errs:
+            self.log.append(f"'{cmd}' rejected: {'; '.join(errs)}")
+
     def w(self, cmd: str) -> None:
         self.i.write(cmd)
         errs = self.drain_errors()
@@ -115,6 +128,9 @@ class RigolScope(ScopeInterface):
         scale = s.seconds / 10.0                       # 10 horizontal divisions
         self.w(":STOP")
         self.w(":TIMebase:MODE MAIN")
+        # Rigol scopes drop into Roll mode on their own at slow timebases (about 200 ms/div and up);
+        # in Roll the trigger is disabled, so SINGle never arms. Not critical: some firmware may not know it.
+        self._try(":TIMebase:ROLL 0")             # DHO800 answered -120 "Invalid number" to OFF
         self.w(f":TIMebase:MAIN:SCALe {scale}")
         # trigger point sits `pretrig` of the screen from the left (verify on screen)
         self.w(f":TIMebase:MAIN:OFFSet {(0.5 - s.pretrig) * 10 * scale}")
@@ -141,6 +157,10 @@ class RigolScope(ScopeInterface):
         self.w(":TRIGger:EDGE:SLOPe POSitive")
         self.w(f":TRIGger:EDGE:LEVel {s.trig_level}")
         self.w(":TRIGger:SWEep SINGle")
+        sweep = self.q(":TRIGger:SWEep?")
+        if not _same(sweep, "SINGle"):
+            self.log.append(f"WARNING: trigger sweep is {sweep}, not SINGle; the scope will not wait "
+                            f"for the crank. Is it in Roll mode (Horizontal menu)?")
 
     def self_check(self, s: CaptureSettings) -> list[tuple[bool, str]]:
         """Configure, then read every setting back and report mismatches."""
@@ -173,7 +193,7 @@ class RigolScope(ScopeInterface):
         for cmd, want, name in text:
             try:
                 got = self.q(cmd)
-                out.append((got[:4].upper() == want[:4].upper(),
+                out.append((_same(got, want),
                             f"{name}: asked {want}, scope reports {got}"))
             except Exception as e:
                 out.append((False, f"{name}: query failed ({e})"))
@@ -196,6 +216,11 @@ class RigolScope(ScopeInterface):
             t, channels[c.n] = self._fetch_channel(c.n, chunk)
         if t is None:
             raise ScopeError("No channels enabled.")
+        lengths = {n: len(v) for n, v in channels.items()}
+        if len(set(lengths.values())) > 1:
+            raise ScopeError("Channels came back with different numbers of points ("
+                             + ", ".join(f"CH{n} {k}" for n, k in lengths.items())
+                             + "); the download window was not reset. Capture again.")
         labels = {c.n: c.label for c in s.channels if c.enabled}
         points = len(t)
         want = _depth_value(self._requested_depth)
@@ -211,6 +236,15 @@ class RigolScope(ScopeInterface):
         self.w(f":WAVeform:SOURce CHANnel{ch}")
         self.w(":WAVeform:MODE RAW")
         self.w(":WAVeform:FORMat BYTE")
+        # The DHO804's preamble reports the points in the current STARt..STOP window, and that window
+        # stays where the last chunked read left it, so open it to the whole memory first. The scope
+        # may refuse a STOP past its real memory; the window is also restored after each read below.
+        self._try(":WAVeform:STARt 1")
+        try:
+            full = int(_depth_value(self._depth_reported))
+        except ValueError:
+            full = int(_depth_value(self._requested_depth))
+        self._try(f":WAVeform:STOP {full}")
         pre = [float(x) for x in self.q(":WAVeform:PREamble?").split(",")]
         n, xinc, xorg, xref, yinc, yorg, yref = (
             int(pre[2]), pre[4], pre[5], pre[6], pre[7], pre[8], pre[9])
@@ -224,7 +258,9 @@ class RigolScope(ScopeInterface):
             self.w(f":WAVeform:STOP {stop}")
             d = self.i.query_binary_values(":WAVeform:DATA?", datatype="B", container=np.array)
             raw[start - 1:stop] = d[: stop - start + 1]
-        v = (raw.astype(np.float32) - yorg - yref) * yinc
+        self._try(":WAVeform:STARt 1")                 # leave the window whole for the next channel
+        self._try(f":WAVeform:STOP {n}")
+        v =(raw.astype(np.float32) - yorg - yref) * yinc
         t = (np.arange(n) - xref) * xinc + xorg
         return t, v
 
