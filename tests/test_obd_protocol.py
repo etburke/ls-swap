@@ -278,3 +278,14 @@ def test_ecu_reply_raises_on_an_unexpected_reply_from_the_wanted_ecu():
 
 def test_busy_nrcs():
     assert P.BUSY_NRC == (0x21, 0x22, 0x78)
+
+
+@pytest.mark.parametrize("pid,data,value", [(0x0E, b"\x8c", 6.0), (0x4C, b"\x54", 32.94), (0x44, b"\x80\x00", 1.0),
+                                            (0x10, b"\x01\xf4", 5.0), (0x46, b"\x30", 8)])
+def test_new_pid_decodes(pid, data, value):
+    assert P.decode_pid(pid, data)[0] == pytest.approx(value, abs=0.01)
+
+
+def test_poll_pids_exclude_rpm_and_cover_table():
+    from crank.obd.pids import PIDS, POLL_PIDS
+    assert 0x0C not in POLL_PIDS and set(POLL_PIDS) | {0x0C} == set(PIDS)

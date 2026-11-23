@@ -67,3 +67,14 @@ def test_listen_only_monitor_commands_are_allowed(cmd):
 def test_transmit_capable_and_unlisted_monitor_commands_stay_refused(cmd):
     with pytest.raises(ObdForbiddenCommand):
         check(cmd)
+
+
+@pytest.mark.parametrize("cmd", ["010C", "010C0E", "010C0E11454749", "010C 0E 11"])
+def test_mode01_one_to_six_pids_allowed(cmd):
+    assert check(cmd).startswith("01")
+
+
+@pytest.mark.parametrize("cmd", ["010C0E1145474949", "010", "010C0", "0904", "22F40C"])
+def test_mode01_seven_pids_or_odd_lengths_refused(cmd):
+    with pytest.raises(ObdForbiddenCommand):
+        check(cmd)
