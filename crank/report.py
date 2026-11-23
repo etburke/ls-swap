@@ -70,7 +70,7 @@ def build_figure(data: CaptureData, a: Analysis, x0: float | None = None,
     m = (t >= x0) & (t <= x1)
     roles = a.roles or roles_of(data)
     rows = [(f"CH{n} · {data.labels.get(n, f'CH{n}')} · {role_label(*roles.get(n, ('other', None)))}",
-             data.channels[n], ROLES[roles.get(n, ("other", None))[0]].kind == "crank")
+             data.channels[n], ROLES[roles.get(n, ("other", None))[0]].kind != "basic")
             for n in sorted(data.channels)]
     rel = a.reports.get("ecm_rel")
     if rel is not None:

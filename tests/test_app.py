@@ -833,9 +833,9 @@ def test_results_roles_editor_saves_and_logs_a_reanalysis(at):
     _arm_and_finish(at)
     _go(at, "Results")
     cid = get_controller().store.open(get_controller().session_name).list_captures()[-1]["id"]
-    at.selectbox(key=f"role_{cid}_2").set_value("Cam signal")
-    at.selectbox(key=f"role_{cid}_3").set_value("Ignition control (EST)").run()
-    at.number_input(key=f"num_{cid}_3").set_value(1)
+    _role_box(at, 2).set_value("Cam signal")
+    _role_box(at, 3).set_value("Ignition control (EST)").run()
+    _role_num(at, 3).set_value(1)
     at.button(key="save_roles").click().run()
     assert not at.exception
     texts = [e.text for e in _case().events() if e.type == "observation"]
@@ -844,3 +844,40 @@ def test_results_roles_editor_saves_and_logs_a_reanalysis(at):
     got = get_controller().store.open(get_controller().session_name).load_capture(cid)
     assert got.meta["roles_source"] == "corrected" and got.meta["roles"]["2"]["role"] == "cam"
     assert not any("harness" in m.value.lower() for m in at.markdown)   # re-analysed verdict shown, no mismatch
+
+
+def _role_box(at, n):
+    return next(w for w in at.selectbox if (w.key or "").startswith(f"role_{n}_"))
+
+
+def _role_num(at, n):
+    return next(w for w in at.number_input if (w.key or "").startswith(f"num_{n}_"))
+
+
+def test_results_roles_editor_shows_roles_changed_elsewhere_and_keeps_them(at):
+    _arm_and_finish(at)
+    _go(at, "Results")
+    ctrl = get_controller()
+    ses = ctrl.store.open(ctrl.session_name)
+    cid = ses.list_captures()[-1]["id"]
+    ses.set_capture_roles(cid, {2: ("cam", None)})            # e.g. the AI corrected it over MCP
+    at.run()
+    assert _role_box(at, 2).value == "Cam signal"
+    _role_box(at, 4).set_value("ECM ground")
+    at.button(key="save_roles").click().run()
+    got = ses.load_capture(cid)
+    assert got.meta["roles"]["2"]["role"] == "cam" and got.meta["roles"]["4"]["role"] == "ecm_ground"
+
+
+def test_results_page_survives_an_unknown_saved_role(at):
+    _arm_and_finish(at)
+    ctrl = get_controller()
+    ses = ctrl.store.open(ctrl.session_name)
+    cid = ses.list_captures()[-1]["id"]
+    import json
+    p = ses.path / "captures" / f"{cid}.json"
+    meta = json.loads(p.read_text())
+    meta["roles"] = {"1": {"role": "crank_ecm", "num": None}, "2": {"role": "bogus"}}
+    p.write_text(json.dumps(meta))
+    _go(at, "Results")
+    assert not at.exception and _role_box(at, 2).value == "Other"

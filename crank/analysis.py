@@ -165,7 +165,9 @@ def supply_stats(t: np.ndarray, chans: dict, th: Thresholds, window, refs=(3,), 
 
 def basic_stats(t: np.ndarray, v: np.ndarray) -> dict:
     """Plain numbers for a channel no check applies to: levels, and pulses counted with a Schmitt trigger at
-    30% / 70% of its 1st-99th percentile span."""
+    30% / 70% of its 1st-99th percentile span. A pulse is the *active* state, the one the line spends less time
+    in: high for an ignition command, low for a low-side injector driver. Pulses cut off by the record's ends are
+    not counted."""
     ok = np.isfinite(v)
     if not ok.any():
         return {"min": None, "median": None, "max": None, "pulses": 0, "pulse_width_ms_median": None}
@@ -176,12 +178,14 @@ def basic_stats(t: np.ndarray, v: np.ndarray) -> dict:
     span = p99 - p1
     if span < 0.2:                                    # flat: no pulses worth counting
         return out
-    s = schmitt(np.where(ok, v, p1), p1 + 0.3 * span, p1 + 0.7 * span)
-    rise = np.flatnonzero(~s[:-1] & s[1:]) + 1
-    fall = np.flatnonzero(s[:-1] & ~s[1:]) + 1
-    out["pulses"] = int(len(rise))
-    widths = [t[fall[j]] - t[r] for r in rise for j in [np.searchsorted(fall, r)] if j < len(fall)]
-    if len(widths) >= 2:
+    tt, s = t[ok], schmitt(x, p1 + 0.3 * span, p1 + 0.7 * span)
+    active = not (s.mean() > 0.5)                     # the minority state is the pulse
+    on = s if active else ~s
+    starts = np.flatnonzero(~on[:-1] & on[1:]) + 1
+    ends = np.flatnonzero(on[:-1] & ~on[1:]) + 1
+    widths = [tt[ends[j]] - tt[st] for st in starts for j in [np.searchsorted(ends, st)] if j < len(ends)]
+    out["pulses"] = len(widths)
+    if widths:
         out["pulse_width_ms_median"] = float(np.median(widths) * 1000)
     return out
 

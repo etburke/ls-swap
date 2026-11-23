@@ -63,9 +63,19 @@ def parse_role(text: str) -> tuple[str, int | None]:
     return key, int(n)
 
 
+def clean_num(key: str, num) -> int | None:
+    """The number a role keeps: an int 1-8 on a numbered role, else None."""
+    r = ROLES.get(key)
+    try:
+        n = int(num)
+    except (TypeError, ValueError):
+        return None
+    return n if r is not None and r.numbered and 1 <= n <= 8 else None
+
+
 def roles_meta(channels) -> dict:
     """{"n": {"role", "num"}} for the enabled channels of a channel table, as saved with a capture."""
-    return {str(c.n): {"role": c.role, "num": c.num} for c in channels if c.enabled}
+    return {str(c.n): {"role": c.role, "num": clean_num(c.role, c.num)} for c in channels if c.enabled}
 
 
 def legacy_meta(channel_numbers) -> dict:
@@ -89,5 +99,5 @@ def roles_of(data) -> dict[int, tuple[str, int | None]]:
     for n in data.channels:
         r = meta.get(str(n)) or {"role": "other", "num": None}
         key = r.get("role") if r.get("role") in ROLES else "other"
-        out[int(n)] = (key, r.get("num"))
+        out[int(n)] = (key, clean_num(key, r.get("num")))
     return out

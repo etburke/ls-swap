@@ -31,3 +31,16 @@ def test_role_label():
 def test_default_channels_carry_legacy_roles():
     from crank.model import default_channels
     assert {c.n: (c.role, c.num) for c in default_channels()} == LEGACY_ROLES
+
+
+def test_numbers_only_stay_on_numbered_roles():
+    from crank.model import ChannelConfig
+    from crank.roles import roles_meta, roles_of
+    from crank.model import CaptureData
+    import numpy as np
+    meta = roles_meta([ChannelConfig(2, "x", 1.0, role="cam", num=3), ChannelConfig(3, "y", 1.0, role="est", num=3)])
+    assert meta == {"2": {"role": "cam", "num": None}, "3": {"role": "est", "num": 3}}
+    d = CaptureData(np.zeros(3), {1: np.zeros(3), 2: np.zeros(3), 3: np.zeros(3)}, {},
+                    {"roles": {"1": {"role": "bogus", "num": None}, "2": {"role": "cam", "num": 4},
+                               "3": {"role": "est", "num": "x"}}})
+    assert roles_of(d) == {1: ("other", None), 2: ("cam", None), 3: ("est", None)}

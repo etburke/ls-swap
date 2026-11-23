@@ -12,7 +12,7 @@ from crank.controller import get_controller, lan_ip
 from crank.mcp_server import ensure_mcp_server
 from crank.model import CaptureSettings, ChannelConfig, Thresholds
 from crank.procedure import STEPS
-from crank.roles import ROLES, role_label
+from crank.roles import ROLES, clean_num, role_label, roles_of
 from crank.report import build_figure, build_overlay, to_csv
 from crank.scope import RigolScope, ScopeError
 from crank.sim import SCENARIOS
@@ -194,7 +194,8 @@ def page_capture():
                            "num": st.column_config.NumberColumn("num", min_value=1, max_value=8, step=1,
                                                                 help="Cylinder / circuit for EST, injector, "
                                                                      "TP, pedal; coil low ref 1 = odd bank")})
-        rows = [{**r, "role": ROLE_BY_NAME.get(r.get("role"), "other"), "num": _num(r.get("num"))} for r in rows]
+        rows = [{**r, "role": ROLE_BY_NAME.get(r.get("role"), "other")} for r in rows]
+        rows = [{**r, "num": clean_num(r["role"], _num(r.get("num")))} for r in rows]
         c1, c2, c3, c4 = st.columns(4)
         seconds = c1.number_input("Capture length (s)", 1.0, 30.0, s.seconds, disabled=busy)
         pretrig = c2.number_input("Pre-trigger (fraction)", 0.0, 0.9, s.pretrig, disabled=busy)
@@ -274,7 +275,7 @@ def summary_row(a):
     r = a.reports.get(ecm) or next((v for k, v in a.reports.items() if k != "ecm_rel"), None)
     s = a.supply
     return {
-        "edges (CH1)": r.n_edges if r else None,
+        "crank edges": r.n_edges if r else None,
         "good revs": f"{r.revs_good}/{r.revs}" if r and r.usable else "n/a",
         "median RPM": round(r.rpm_median) if r and r.rpm_median else None,
         "runt highs": r.runt_hi if r else None,
@@ -300,7 +301,10 @@ def roles_editor(sess, cid: str) -> None:
     data = sess.load_capture(cid)
     src = {"corrected": "corrected", "saved": "saved with the capture", "legacy": "legacy layout"}[
         data.meta["roles_source"]]
-    current = {int(n): (r["role"], r.get("num")) for n, r in data.meta["roles"].items()}
+    current = roles_of(data)
+    # keys carry the session and the roles as saved, so roles changed elsewhere (another session, MCP) show here
+    fp = "-".join(f"{k}{n or ''}" for _, (k, n) in sorted(current.items()))
+    tag = f"{sess.name}_{cid}_{fp}"
     with st.expander(f"Channel roles ({src})", expanded=data.meta["roles_source"] == "legacy"):
         chosen = {}
         for n in sorted(data.channels):
@@ -308,10 +312,10 @@ def roles_editor(sess, cid: str) -> None:
             c1, c2, c3 = st.columns([3, 4, 1])
             c1.markdown(f"**CH{n}** · {data.labels.get(n, '')}")
             name = c2.selectbox(f"CH{n} role", ROLE_NAMES, index=ROLE_NAMES.index(ROLES[key].name),
-                                key=f"role_{cid}_{n}", label_visibility="collapsed",
+                                key=f"role_{n}_{tag}", label_visibility="collapsed",
                                 help=ROLES[key].pins or None)
             k = ROLE_BY_NAME[name]
-            num_v = c3.number_input(f"CH{n} no.", 0, 8, num or 0, key=f"num_{cid}_{n}",
+            num_v = c3.number_input(f"CH{n} no.", 0, 8, num or 0, key=f"num_{n}_{tag}",
                                     label_visibility="collapsed", disabled=not ROLES[k].numbered)
             chosen[n] = (k, (num_v or None) if ROLES[k].numbered else None)
             if ROLES[k].pins:

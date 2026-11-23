@@ -83,3 +83,10 @@ def test_figure_keeps_the_ecm_relative_row_for_the_classic_layout():
     d = generate("ground_lift")
     titles = [a.text for a in build_figure(d, analyze_capture(d)).layout.annotations]
     assert any("Crank as the ECM sees it (CH1-CH4)" in t for t in titles) and len(titles) == 5
+
+
+def test_legacy_figure_marks_events_on_supply_rows_too():
+    d = generate("ref_sag")
+    fig = build_figure(d, analyze_capture(d))
+    markers = [tr for tr in fig.data if tr.line and tr.line.color == "rgba(220,0,0,0.35)"]
+    assert len(markers) == 5                                   # 4 channels + the ECM-relative row, as before roles

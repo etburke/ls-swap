@@ -174,3 +174,13 @@ def test_worst_of_two_reference_channels_is_reported():
     a = analyze_capture(d)
     assert a.supply["ref_channel"] == 3
     assert "Crank 5V reference" in next(f.title for f in a.findings if f.code == "ref_sag")
+
+
+def test_basic_stats_pulse_width_is_the_short_active_state():
+    from crank.analysis import basic_stats
+    t = np.arange(0, 1.0, 1e-5)
+    inj = np.where((t % 0.1) < 0.003, 0.0, 12.0)          # low-side driver: 3 ms low every 100 ms
+    est = np.where((t % 0.25) < 0.0057, 4.0, 0.0)          # EST: 5.7 ms high every 250 ms
+    assert basic_stats(t, inj)["pulse_width_ms_median"] == pytest.approx(3.0, abs=0.05)
+    assert basic_stats(t, est)["pulse_width_ms_median"] == pytest.approx(5.7, abs=0.05)
+    assert basic_stats(t, inj)["pulses"] in (9, 10)
