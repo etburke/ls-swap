@@ -362,3 +362,47 @@ def test_a_pid_missing_from_a_group_reply_is_no_answer(tmp_path):
     assert thr and all(r["value"] is None and r["reason"] == "no_answer" for r in thr)
     assert any(r["cmd"] == "010C" and r["value"] is not None for r in rows)
     assert not any("one PID at a time" in n for n in job.meta["notes"])
+
+
+class GroupFlake(Recording):
+    """A real-world brownout: after a few good group replies, two group requests in a row get NO DATA."""
+
+    def __init__(self, inner, reply="NO DATA", start=3, count=2):
+        super().__init__(inner)
+        self.reply, self.start, self.count, self.groups = reply, start, count, 0
+
+    def send(self, cmd, timeout=5.0):
+        c = cmd.strip()
+        if c.startswith("01") and len(c) > 4 and c[2:4] not in ("00", "20", "40", "60"):
+            self.groups += 1
+            if self.start < self.groups <= self.start + self.count:
+                self.sent.append(cmd)
+                return self.reply
+        return super().send(cmd, timeout)
+
+
+def test_transient_failures_after_good_group_replies_do_not_force_single_pid(tmp_path):
+    job = run(tmp_path, "crank_poll_multi", "poll", seconds=1.5, transport=GroupFlake(SimTransport("crank_poll_multi")))
+    _, rows = SessionStore(tmp_path).open("s").load_watch(job.meta["id"])
+    assert not any("one PID at a time" in n for n in job.meta["notes"])
+    late = [r for r in rows[len(rows) // 2:] if r["cmd"] == "010C"]
+    assert late and all(len(r["req"]) > 4 for r in late)          # still grouped after the flake
+
+
+class GroupsAlwaysBusy(Recording):
+    """A PCM that answers every multi-PID request with NRC 22 (conditions not correct) but single PIDs fine."""
+
+    def send(self, cmd, timeout=5.0):
+        c = cmd.strip()
+        if c.startswith("01") and len(c) > 4 and c[2:4] not in ("00", "20", "40", "60"):
+            self.sent.append(cmd)
+            return "7E8037F0122"
+        return super().send(cmd, timeout)
+
+
+def test_group_requests_always_busy_fall_back_and_rpm_still_comes(tmp_path):
+    job = run(tmp_path, "crank_poll_multi", "poll", seconds=1.5,
+              transport=GroupsAlwaysBusy(SimTransport("crank_poll_multi")))
+    _, rows = SessionStore(tmp_path).open("s").load_watch(job.meta["id"])
+    assert any("one PID at a time" in n for n in job.meta["notes"])
+    assert any(r["cmd"] == "010C" and r["value"] is not None for r in rows)

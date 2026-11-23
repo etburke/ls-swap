@@ -580,3 +580,16 @@ def test_get_watch_returns_any_pid_series(ctrl, tools):
             tools.get_watch("001", pid="zz")
     finally:
         tools.obd_disconnect()
+
+
+def test_get_watch_without_rpm_still_returns_summary_and_ids(ctrl, tools):
+    ctrl.sync(session_name="bench")
+    w = ctrl.store.open("bench").new_watch()
+    w.record({"t": 1.0, "raw": "", "id": "1A1", "dlc": 8, "data": "", "decoded": []})
+    w.finish({"id": w.id if hasattr(w, "id") else "001", "mode": "raw", "started": 0.0, "sim": True,
+              "summary": {"frames": 1, "ids": {"1A1": {"count": 1, "hz": 1.0}}, "engine_speed": None}})
+    out = tools.get_watch("001")
+    assert out["series"] == [] and out["engine_speed_series"] == [] and out["available_pids"] == []
+    assert out["ids"] == {"1A1": {"count": 1, "hz": 1.0}} and out["summary"]["frames"] == 1
+    with pytest.raises(ToolError, match="4C"):
+        tools.get_watch("001", pid="4C")

@@ -19,6 +19,7 @@ DEFAULT_SECONDS = 20.0
 FIRST_TIMEOUT = 20.0                     # the first OBD request may start a protocol search
 POLL_PERIOD = 0.1                        # shortest poll cycle, so a fast adapter does not flood the file
 ATRV_EVERY = 4
+GROUP_GIVE_UP = 4                        # group requests that may go unanswered before any works, then single PIDs
 MONITOR_GRACE = 0.2                      # ATMA counts as accepted after this long with no error
 SILENT_TEXT = "The vehicle did not answer. Is the key on?"
 END_NOTES = {
@@ -26,7 +27,7 @@ END_NOTES = {
     "reset": "The adapter reset during the watch; its settings were re-applied.",
     "silent": "No CAN traffic for 1 s; the watch ended early.",
     "prompt": "The adapter ended monitor mode on its own.",
-    "single_pid": "The PCM refused multi-PID requests; polled one PID at a time (RPM every other request).",
+    "single_pid": "The PCM did not accept multi-PID requests; polled one PID at a time (RPM every other request).",
 }
 
 
@@ -261,8 +262,9 @@ class WatchJob:
         return supported
 
     def _poll(self, pids: tuple[int, ...], t: float, timeout: float) -> str:
-        """Send one request for `pids` and record one row per PID. Returns "ok", "busy", or "refused" (a
-        negative answer, no answer, an unreadable reply, or a multi-PID reply without RPM)."""
+        """Send one request for `pids` and record one row per PID. Returns "ok"; "refused" (a negative answer that
+        is not busy, or a multi-PID reply without RPM); "busy"; or "no_answer" (NO DATA, an unreadable reply or an
+        adapter error: transient things, common while cranking)."""
         req, raw, data, reason = P.request_multi(pids), "", None, ""
         try:
             raw = self._send(req, timeout)
@@ -292,9 +294,11 @@ class WatchJob:
                 self.latest_rpm, self.max_rpm = value, max(value, self.max_rpm or 0.0)
             self._record({"t": t, "cmd": f"01{pid:02X}", "req": req, "raw": raw.strip(), "value": value,
                           "unit": PIDS[pid].unit, "reason": why})
-        if reason == "busy":
-            return "busy"
-        if reason or (len(pids) > 1 and 0x0C not in (data or {})):
+        if reason in ("busy", "refused"):
+            return reason
+        if reason:
+            return "no_answer"
+        if len(pids) > 1 and 0x0C not in data:
             return "refused"
         return "ok"
 
@@ -307,7 +311,9 @@ class WatchJob:
         groups = poll_groups(supported)
         others = [p for p in POLL_PIDS if p in supported]
         self.recording_at = time.time()
-        deadline, n, refusals, single, k = time.monotonic() + self.limit, 0, 0, len(groups[0]) == 1, 0
+        deadline, n, single, k = time.monotonic() + self.limit, 0, len(groups[0]) == 1, 0
+        refusals = misses = 0                         # consecutive refused / not-ok group requests
+        group_ok = False                              # has any group request been answered properly?
         while True:
             self._check_until()
             if self._halt.is_set():
@@ -322,8 +328,14 @@ class WatchJob:
                 pids = groups[n % len(groups)]
             verdict = self._poll(pids, time.time(), FIRST_TIMEOUT if n == 0 else 5.0)
             if not single and len(pids) > 1:
-                refusals = refusals + 1 if verdict == "refused" else 0
-                if refusals >= 2:
+                if verdict == "ok":
+                    group_ok, refusals, misses = True, 0, 0
+                else:
+                    refusals += verdict == "refused"
+                    misses += 1
+                # an explicit refusal twice running, or groups never once answered: a dropout or a busy spell
+                # after groups have worked is weathered, not taken as the PCM refusing them
+                if refusals >= 2 or (not group_ok and misses >= GROUP_GIVE_UP):
                     single = True
                     self.notes.append(END_NOTES["single_pid"])
             if self.latest_rpm is not None and any(r["cmd"] == "010C" and r["value"] is not None

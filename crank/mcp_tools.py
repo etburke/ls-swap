@@ -256,10 +256,10 @@ class Tools:
             want = int(pid, 16)
         except (TypeError, ValueError):
             want = -1
-        if want not in available:
+        if want not in available and want != 0x0C:      # no RPM is a finding: still return the summary and IDs
             raise ToolError(f"Watch {watch_id} has no values for PID {pid!r}. "
                             f"Available: {', '.join(names) or 'none'}.")
-        ser = pid_series(meta, rows, want)
+        ser = pid_series(meta, rows, 0x0C if want not in available else want)
         series = []
         if ser.points:
             td, vd = decimate(np.array([p[0] for p in ser.points]), np.array([p[1] for p in ser.points]), max_points)
