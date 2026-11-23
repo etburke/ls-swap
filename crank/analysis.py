@@ -31,6 +31,7 @@ class SignalReport:
     rpm_min: float | None = None
     rpm_max: float | None = None
     bad_revs: list = field(default_factory=list)      # (time, edge_count)
+    rev_rpm: list = field(default_factory=list)       # (mid-time, rpm) of each complete revolution
     events: list = field(default_factory=list)        # (time, kind)
 
     @property
@@ -120,6 +121,9 @@ def analyze_signal(name: str, label: str, t: np.ndarray, v: np.ndarray,
         rep.rpm_median, rep.rpm_min, rep.rpm_max = (
             float(np.median(rpm)), float(rpm.min()), float(rpm.max()))
         rep.bad_revs = [(float(tr[gaps[j] + 1]), int(counts[j])) for j in bad]
+        start, end = tr[gaps[:-1] + 1], tr[gaps[1:] + 1]
+        rep.rev_rpm = [(float((start[j] + end[j]) / 2), float(rpm[j])) for j in range(len(counts))
+                       if counts[j] == th.teeth]
 
     ev = [(float(tr[i + 1]), "missing edge?") for i in drops]
     ev += [(float(tr[i + 1]), "extra edge") for i in extra]

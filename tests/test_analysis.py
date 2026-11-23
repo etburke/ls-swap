@@ -115,3 +115,11 @@ def test_nan_samples_prevent_a_clean_verdict():
     d.channels[4] = d.channels[4].copy()
     d.channels[4][100_000] = np.nan
     assert analyze_capture(d).codes == {"bad_samples"}
+
+
+def test_rev_rpm_from_sim_capture():
+    rep = analyze_capture(generate("healthy")).reports["ch1"]
+    assert rep.rev_rpm and len(rep.rev_rpm) == rep.revs_good
+    assert all(50 < r < 1000 for _, r in rep.rev_rpm)
+    ts = [t for t, _ in rep.rev_rpm]
+    assert ts == sorted(ts)
