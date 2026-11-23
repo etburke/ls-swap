@@ -149,6 +149,30 @@ def supported_pids(base: int, data: bytes) -> set[int]:
     return out
 
 
+def request_multi(pids) -> str:
+    """One mode 01 request for one to six PIDs (the most a CAN request may carry), e.g. '010C0E11'."""
+    pids = list(pids)
+    if not 1 <= len(pids) <= 6:
+        raise ValueError(f"a mode 01 request carries 1 to 6 PIDs, not {len(pids)}")
+    return "01" + "".join(f"{p:02X}" for p in pids)
+
+
+def split_multi(data: bytes, pids) -> dict[int, bytes]:
+    """{pid: value bytes} from a multi-PID reply (the message after 0x41). The PCM may answer in any order and
+    leave PIDs out; parsing stops at a PID that was not asked for or a value cut short, keeping what came before."""
+    wanted, out, i = set(pids), {}, 0
+    while i < len(data):
+        pid = data[i]
+        if pid not in wanted or pid not in PIDS:
+            break
+        n = PIDS[pid].nbytes
+        if i + 1 + n > len(data):
+            break
+        out[pid] = bytes(data[i + 1:i + 1 + n])
+        i += 1 + n
+    return out
+
+
 def decode_pid(pid: int, data: bytes):
     """(value, unit) for a known PID, or None if the data is too short."""
     p = PIDS[pid]

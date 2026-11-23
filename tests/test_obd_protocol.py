@@ -289,3 +289,34 @@ def test_new_pid_decodes(pid, data, value):
 def test_poll_pids_exclude_rpm_and_cover_table():
     from crank.obd.pids import PIDS, POLL_PIDS
     assert 0x0C not in POLL_PIDS and set(POLL_PIDS) | {0x0C} == set(PIDS)
+
+
+def test_request_multi_builds_and_limits():
+    assert P.request_multi([0x0C, 0x0E, 0x11]) == "010C0E11"
+    with pytest.raises(ValueError):
+        P.request_multi([0x0C] * 7)
+    with pytest.raises(ValueError):
+        P.request_multi([])
+
+
+def test_split_multi_any_order_and_missing():
+    data = bytes([0x11, 0x54, 0x0C, 0x02, 0x08, 0x0E, 0x8C])      # 11, then 0C, then 0E; 4C left out
+    assert P.split_multi(data, [0x0C, 0x0E, 0x11, 0x4C]) == {0x11: b"\x54", 0x0C: b"\x02\x08", 0x0E: b"\x8c"}
+
+
+def test_split_multi_truncated_value_dropped():
+    assert P.split_multi(bytes([0x0C, 0x02]), [0x0C]) == {}
+
+
+def test_split_multi_stops_at_an_unrequested_pid():
+    assert P.split_multi(bytes([0x0C, 0x02, 0x08, 0x99, 0x01, 0x11, 0x54]), [0x0C, 0x11]) == {0x0C: b"\x02\x08"}
+
+
+def test_multi_reply_across_isotp_frames():
+    from crank.obd.transport import _isotp
+    body = bytes([0x41, 0x0C, 0x02, 0x08, 0x0E, 0x8C, 0x11, 0x54, 0x45, 0x5C, 0x47, 0x00, 0x49, 0x10])
+    resp = "\r".join("7E8" + f.hex().upper() for f in _isotp(body))
+    assert resp.count("\r") >= 1                                    # really several frames
+    msg = P.ecu_messages(resp)["7E8"]
+    got = P.split_multi(msg[1:], [0x0C, 0x0E, 0x11, 0x45, 0x47, 0x49])
+    assert set(got) == {0x0C, 0x0E, 0x11, 0x45, 0x47, 0x49} and got[0x49] == b"\x10"
