@@ -61,3 +61,22 @@ def parse_role(text: str) -> tuple[str, int | None]:
     if not n.isdigit() or not 1 <= int(n) <= 8:
         raise ValueError(f"Role number must be 1 to 8, not {n!r}.")
     return key, int(n)
+
+
+def roles_meta(channels) -> dict:
+    """{"n": {"role", "num"}} for the enabled channels of a channel table, as saved with a capture."""
+    return {str(c.n): {"role": c.role, "num": c.num} for c in channels if c.enabled}
+
+
+def legacy_meta(channel_numbers) -> dict:
+    """The pre-roles layout for the channels a capture has (channels beyond CH4 are 'other')."""
+    out = {}
+    for n in sorted(channel_numbers):
+        key, num = LEGACY_ROLES.get(int(n), ("other", None))
+        out[str(n)] = {"role": key, "num": num}
+    return out
+
+
+def check_role(key: str, num: int | None) -> tuple[str, int | None]:
+    """Validate a (role, number) pair the way parse_role validates text."""
+    return parse_role(f"{key}:{num}" if num is not None else key)

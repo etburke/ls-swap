@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 
 from .model import CaptureData, CaptureSettings
+from .roles import roles_meta
 
 
 class ScopeError(Exception):
@@ -229,7 +230,7 @@ class RigolScope(ScopeInterface):
                             f"requested; fine detail (runts) may be undersampled.")
         meta = {"sim": False, "idn": self.identify(), "points": points,
                 "depth_requested": self._requested_depth,
-                "depth_reported": self._depth_reported, "srate": self._srate}
+                "depth_reported": self._depth_reported, "srate": self._srate, "roles": roles_meta(s.channels)}
         return CaptureData(t, channels, labels, meta)
 
     def _fetch_channel(self, ch: int, chunk: int):
@@ -316,4 +317,5 @@ class SimScope(ScopeInterface):
         keep = {c.n for c in s.channels if c.enabled}
         d.channels = {n: v for n, v in d.channels.items() if n in keep}
         d.labels = {c.n: c.label for c in s.channels if c.enabled}
+        d.meta["roles"] = roles_meta(s.channels)
         return d

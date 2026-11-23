@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from .model import CaptureData
+from .roles import check_role, legacy_meta
 
 
 def _safe(name: str) -> str:
@@ -90,12 +91,42 @@ class Session:
         out = []
         for cid in self._ids():
             meta = _read_json(self.path / "captures" / f"{cid}.json", None)
-            out.append(meta or {"id": cid, "label": f"capture {cid}", "note": "",
-                                "time": "", "scenario": None, "sim": False})
+            row = meta or {"id": cid, "label": f"capture {cid}", "note": "",
+                           "time": "", "scenario": None, "sim": False}
+            row = {k: v for k, v in row.items() if k != "roles"}
+            row["roles_corrected"] = bool(meta and meta.get("roles"))
+            out.append(row)
         return out
 
     def load_capture(self, cid: str) -> CaptureData:
-        return CaptureData.load(str(self.path / "captures" / f"{cid}.npz"))
+        """The capture, with meta["roles"] the effective channel roles and meta["roles_source"] saying where they
+        came from: "corrected" (the capture's .json), "saved" (recorded with the scope data) or "legacy" (the
+        layout every capture had before roles)."""
+        data = CaptureData.load(str(self.path / "captures" / f"{cid}.npz"))
+        corrected = (_read_json(self.path / "captures" / f"{cid}.json", None) or {}).get("roles")
+        if corrected:
+            data.meta["roles"], data.meta["roles_source"] = corrected, "corrected"
+        elif data.meta.get("roles"):
+            data.meta["roles_source"] = "saved"
+        else:
+            data.meta["roles"], data.meta["roles_source"] = legacy_meta(data.channels), "legacy"
+        return data
+
+    def set_capture_roles(self, cid: str, roles: dict) -> None:
+        """Correct a saved capture's channel roles ({channel: (role, num)}). Stored in the capture's .json; the
+        scope data is never rewritten. Channels not named keep their current role."""
+        data = self.load_capture(cid)
+        merged = {k: dict(v) for k, v in data.meta["roles"].items()}
+        for n, (key, num) in roles.items():
+            if int(n) not in data.channels:
+                raise ValueError(f"Capture {cid} has no CH{int(n)}.")
+            key, num = check_role(key, num)
+            merged[str(int(n))] = {"role": key, "num": num}
+        path = self.path / "captures" / f"{cid}.json"
+        meta = _read_json(path, None) or {"id": cid, "label": f"capture {cid}", "note": "", "time": "",
+                                         "scenario": data.meta.get("scenario"), "sim": data.meta.get("sim", False)}
+        meta["roles"] = merged
+        _write_json(path, meta)
 
     # OBD watches: watches/NNN.jsonl (rows) + watches/NNN.json (meta, written when the watch is kept)
     def _watch_dir(self) -> Path:
