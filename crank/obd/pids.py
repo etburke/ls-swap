@@ -47,6 +47,14 @@ PIDS = {p.id: p for p in (
 
 LIVE_PIDS = (0x0C, 0x42, 0x05, 0x0D, 0x04, 0x06, 0x07, 0x11, 0x0F, 0x0B)
 POLL_PIDS = tuple(p for p in PIDS if p != 0x0C)     # everything a watch polls beside RPM, in table order
+
+
+def read_order(supported) -> list[int]:
+    """What a read asks for: the classic LIVE_PIDS (always listed, supported or not), then every other PID in the
+    table that `supported` contains, in table order."""
+    return list(LIVE_PIDS) + [p for p in PIDS if p not in LIVE_PIDS and p in supported]
+
+
 FREEZE_PIDS = (0x0C, 0x05, 0x04, 0x06, 0x07, 0x0B, 0x0D, 0x0F, 0x11)
 
 DTC_DESCRIPTIONS = {

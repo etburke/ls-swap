@@ -505,7 +505,7 @@ def test_a_busy_freeze_frame_request_is_noted_not_fatal():
 
 def test_result_lines_group_the_missing_values_by_reason():
     lines = read("pid_refused").lines()
-    assert any(l.startswith("Live values read: 9 of 10 (refused by the PCM: Vehicle speed)") for l in lines)
+    assert any(l.startswith("Live values read: 16 of 17 (refused by the PCM: Vehicle speed)") for l in lines)
     assert "(" not in [l for l in read("healthy").lines() if l.startswith("Live values")][0]
 
 
@@ -742,3 +742,15 @@ def test_a_cold_read_on_a_held_transport_still_does_the_full_setup():
     inner = sent_by(SimTransport("healthy")); inner.open()
     r = ObdReader(HeldTransport(inner), retry_pause=0).read()
     assert inner.sent[:len(INIT)] == list(INIT) and r.adapter.supports_st
+
+
+def test_read_includes_new_supported_pids():
+    got = {v.pid: v.value for v in read("healthy").live}
+    assert got[0x4C] is not None and got[0x0E] is not None
+    assert 0x10 not in got                                   # not advertised by the sim: no row
+
+
+def test_read_order_puts_the_classic_ten_first():
+    from crank.obd.pids import LIVE_PIDS, read_order
+    order = read_order({0x0C, 0x4C, 0x0E})
+    assert tuple(order[:len(LIVE_PIDS)]) == LIVE_PIDS and order[len(LIVE_PIDS):] == [0x0E, 0x4C]

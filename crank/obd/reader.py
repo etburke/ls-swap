@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from . import protocol as P
 from .adapter import AdapterInfo, clean_id, parse_sti
 from .errors import ObdAdapterError, ObdBusy, ObdCancelled, ObdProtocolError, ObdStopped, ObdTimeout, ObdVehicleSilent
-from .pids import FREEZE_PIDS, LIVE_PIDS, PIDS
+from .pids import FREEZE_PIDS, LIVE_PIDS, PIDS, read_order
 from .reasons import REASON_TEXT, describe_unavailable
 from .transport import Transport
 
@@ -368,7 +368,8 @@ class ObdReader:
 
     def _live(self, out: ObdReadout, supported: set) -> None:
         self._section = "live"
-        for pid in LIVE_PIDS:
+        extra = {p for p in PIDS if self._unknown(p)}            # maps that could not be read: ask anyway
+        for pid in read_order(supported | extra):
             p, value, reason = PIDS[pid], None, ""
             if pid in supported or self._unknown(pid):
                 d, reason = self._pid(0x01, pid)
