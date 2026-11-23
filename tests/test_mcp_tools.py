@@ -559,3 +559,24 @@ def test_arm_capture_with_watch_links_them(ctrl, tools):
     assert ctrl.job.state == "done" and tools.list_watches()["watches"] == []
     assert "Connect to the adapter first" in ctrl.snapshot()["watch_note"]
     assert r["armed"] is True
+
+
+def test_get_watch_returns_any_pid_series(ctrl, tools):
+    ctrl.ai_control = True
+    ctrl.sync(session_name="bench")
+    assert tools.obd_connect("sim:crank_poll_multi")["state"] == "connected"
+    try:
+        tools.obd_watch("poll", 1.0)
+        finish_watch(ctrl)
+        rpm = tools.get_watch("001")
+        assert rpm["pid"] == "0C" and rpm["engine_speed_series"] == rpm["series"] and rpm["unit"] == "rpm"
+        assert {"0C", "0E", "4C"} <= set(rpm["available_pids"])
+        thr = tools.get_watch("001", pid="4c")
+        assert thr["pid"] == "4C" and thr["unit"] == "%" and thr["series"] and "engine_speed_series" not in thr
+        assert thr["series_source"] == "014C (official)"
+        with pytest.raises(ToolError, match="0C"):
+            tools.get_watch("001", pid="10")
+        with pytest.raises(ToolError):
+            tools.get_watch("001", pid="zz")
+    finally:
+        tools.obd_disconnect()

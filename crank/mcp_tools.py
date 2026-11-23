@@ -15,6 +15,7 @@ from .analysis import Analysis, analyze_capture
 from .case import Case, capture_snapshot
 from .model import Thresholds
 from .obd.errors import ObdError
+from .obd.series import pid_series, watch_pids
 from .obd.trafficlog import tail_lines
 from .obd.transport import SCENARIOS as OBD_SCENARIOS
 from .render import to_html, to_markdown
@@ -152,16 +153,6 @@ class Tools:
 
     _RPM_SOURCE = {"raw": "decoded from raw CAN frames (best-effort, ID 0C9)", "poll": "010C (official)"}
 
-    @staticmethod
-    def _rpm_series(meta: dict, rows: list[dict]) -> tuple[list[tuple[float, float]], str]:
-        """(seconds from the start of the watch, rpm) from the decoded raw rows or the 010C poll rows."""
-        t0 = meta.get("started") or 0.0
-        if meta.get("mode") == "poll":
-            pts = [(r["t"] - t0, r["value"]) for r in rows if r.get("cmd") == "010C" and r.get("value") is not None]
-            return pts, "010C (official)"
-        pts = [(r["t"] - t0, d["value"]) for r in rows for d in r.get("decoded", []) if d["name"] == "Engine speed"]
-        return pts, "decoded from raw CAN frames (best-effort)"
-
     # -- status (always available)
     def list_sessions(self) -> dict[str, Any]:
         """List the saved sessions (cases) and which one the laptop currently has selected."""
@@ -242,11 +233,14 @@ class Tools:
                         "headline": describe(ev) if ev else None})
         return jsonable({"session": sess.name, "watches": out})
 
-    def get_watch(self, watch_id: str, session: str | None = None, max_points: int = 500) -> dict[str, Any]:
-        """One saved OBD watch: its metadata and summary, the inventory of CAN IDs seen (raw mode), and
-        engine_speed_series, [[seconds since the watch began, rpm]] downsampled to at most max_points (10 to
-        5000) with a min/max envelope so spikes and dropouts survive. Raw-mode values are best-effort decodes
-        of what the PCM broadcast; polled 010C RPM is official OBD data."""
+    def get_watch(self, watch_id: str, session: str | None = None, max_points: int = 500,
+                  pid: str = "0C") -> dict[str, Any]:
+        """One saved OBD watch: its metadata and summary, the inventory of CAN IDs seen (raw mode), and `series`,
+        [[seconds since the watch began, value]] for one PID (`pid`, two hex digits, default 0C engine RPM),
+        downsampled to at most max_points (10 to 5000) with a min/max envelope so spikes and dropouts survive.
+        `available_pids` lists the PIDs the watch holds (poll watches can hold throttle, pedal, timing advance and
+        more). For pid 0C the series is also returned as engine_speed_series. Raw-mode values are best-effort
+        decodes of what the PCM broadcast; polled values are official OBD data."""
         if not MIN_SERIES_POINTS <= max_points <= MAX_SERIES_POINTS:
             raise ToolError(f"max_points must be between {MIN_SERIES_POINTS} and {MAX_SERIES_POINTS}.")
         sess = self._session(session)
@@ -256,15 +250,27 @@ class Tools:
             ids = [m["id"] for m in sess.list_watches()]
             raise ToolError(f"There is no watch {watch_id!r} in session {sess.name!r}. "
                             f"Watches: {', '.join(ids) or 'none'}.") from None
-        pts, source = self._rpm_series(meta, rows)
+        available = watch_pids(meta, rows)
+        names = [f"{p:02X}" for p in available]
+        try:
+            want = int(pid, 16)
+        except (TypeError, ValueError):
+            want = -1
+        if want not in available:
+            raise ToolError(f"Watch {watch_id} has no values for PID {pid!r}. "
+                            f"Available: {', '.join(names) or 'none'}.")
+        ser = pid_series(meta, rows, want)
         series = []
-        if pts:
-            td, vd = decimate(np.array([p[0] for p in pts]), np.array([p[1] for p in pts]), max_points)
+        if ser.points:
+            td, vd = decimate(np.array([p[0] for p in ser.points]), np.array([p[1] for p in ser.points]), max_points)
             series = [[round(float(a), 3), float(b)] for a, b in zip(td, vd)]
         summary = meta.get("summary") or {}
-        return jsonable({"session": sess.name, "watch": meta, "summary": summary, "ids": summary.get("ids", {}),
-                         "engine_speed_series": series, "series_source": source, "samples": len(pts),
-                         "returned": len(series)})
+        out = {"session": sess.name, "watch": meta, "summary": summary, "ids": summary.get("ids", {}),
+               "pid": f"{want:02X}", "name": ser.name, "unit": ser.unit, "available_pids": names,
+               "series": series, "series_source": ser.source, "samples": len(ser.points), "returned": len(series)}
+        if want == 0x0C:
+            out["engine_speed_series"] = series
+        return jsonable(out)
 
     def get_capture_analysis(self, capture_id: str, session: str | None = None) -> dict[str, Any]:
         """Analyze a saved capture with the laptop's current thresholds: findings ranked worst first with
