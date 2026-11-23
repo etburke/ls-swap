@@ -27,7 +27,7 @@ def test_no_signal_does_not_crash_and_reports_zero_edges():
 def test_ground_lift_visible_only_in_pcm_relative_trace():
     a = analyze_capture(generate("ground_lift"))
     assert a.reports["ch1"].anomalies == 0
-    assert a.reports["ch1_rel"].anomalies > 0
+    assert a.reports["ecm_rel"].anomalies > 0
     assert a.supply["gnd_dev_mv"] > 1000
 
 
@@ -123,3 +123,54 @@ def test_rev_rpm_from_sim_capture():
     assert all(50 < r < 1000 for _, r in rep.rev_rpm)
     ts = [t for t, _ in rep.rev_rpm]
     assert ts == sorted(ts)
+
+
+def _roles(**by_ch):
+    return {str(n): {"role": r if isinstance(r, str) else r[0], "num": None if isinstance(r, str) else r[1]}
+            for n, r in by_ch.items()}
+
+
+@pytest.mark.parametrize("scenario", list(SCENARIOS))
+def test_legacy_layout_findings_unchanged(scenario):
+    d = generate(scenario)
+    d.meta.pop("roles", None)
+    with_roles = analyze_capture(generate(scenario))
+    assert analyze_capture(d).codes == with_roles.codes and with_roles.codes >= EXPECTED_CODES[scenario]
+
+
+def test_cam_est_injector_roles_give_no_bogus_verdicts():
+    d = generate("healthy")
+    d.meta["roles"] = {"1": {"role": "crank_ecm", "num": None}, "2": {"role": "cam", "num": None},
+                       "3": {"role": "est", "num": 1}, "4": {"role": "injector", "num": 1}}
+    a = analyze_capture(d)
+    assert not a.codes & {"harness_mismatch", "ref_sag", "ground_lift"}
+    assert "ecm_rel" not in a.reports and set(a.basic) == {"ch2", "ch3", "ch4"}
+    assert a.basic["ch2"]["pulses"] > 0 and a.roles[3] == ("est", 1)
+
+
+def test_swapped_probes_follow_roles():
+    d = generate("ref_sag")
+    d.channels[2], d.channels[3] = d.channels[3], d.channels[2]
+    d.meta["roles"] = {"1": {"role": "crank_ecm", "num": None}, "2": {"role": "crank_ref", "num": None},
+                       "3": {"role": "crank_sensor", "num": None}, "4": {"role": "crank_low", "num": None}}
+    a = analyze_capture(d)
+    assert "ref_sag" in a.codes and a.supply["ref_channel"] == 2 and "harness_mismatch" not in a.codes
+    assert "ecm_rel" in a.reports
+
+
+def test_no_crank_role_is_insufficient_data():
+    d = generate("healthy")
+    d.meta["roles"] = {str(n): {"role": "other", "num": None} for n in d.channels}
+    a = analyze_capture(d)
+    assert [f.code for f in a.findings] == ["insufficient_data"] and set(a.basic) == {"ch1", "ch2", "ch3", "ch4"}
+    assert "role" in a.findings[0].detail.lower()
+
+
+def test_worst_of_two_reference_channels_is_reported():
+    d = generate("ref_sag")
+    d.channels[2] = np.full_like(d.channels[3], 5.0)
+    d.meta["roles"] = {"1": {"role": "crank_ecm", "num": None}, "2": {"role": "cam_ref", "num": None},
+                       "3": {"role": "crank_ref", "num": None}, "4": {"role": "crank_low", "num": None}}
+    a = analyze_capture(d)
+    assert a.supply["ref_channel"] == 3
+    assert "Crank 5V reference" in next(f.title for f in a.findings if f.code == "ref_sag")

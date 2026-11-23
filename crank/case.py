@@ -136,7 +136,9 @@ def capture_snapshot(analysis) -> dict | None:
     """Freeze the verdict and headline numbers so reports do not depend on later analysis changes."""
     if analysis is None:
         return None
-    r = analysis.reports.get("ch1") or next(iter(analysis.reports.values()), None)
+    roles = getattr(analysis, "roles", None) or {}
+    ecm = next((f"ch{n}" for n in sorted(roles) if roles[n][0] == "crank_ecm"), "ch1")
+    r = analysis.reports.get(ecm) or next((v for k, v in analysis.reports.items() if k != "ecm_rel"), None)
     order = {"fail": 0, "warn": 1, "info": 2}
     sag, gnd = analysis.supply.get("ref_sag_mv"), analysis.supply.get("gnd_dev_mv")
     return {

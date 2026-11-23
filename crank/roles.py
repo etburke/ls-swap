@@ -80,3 +80,14 @@ def legacy_meta(channel_numbers) -> dict:
 def check_role(key: str, num: int | None) -> tuple[str, int | None]:
     """Validate a (role, number) pair the way parse_role validates text."""
     return parse_role(f"{key}:{num}" if num is not None else key)
+
+
+def roles_of(data) -> dict[int, tuple[str, int | None]]:
+    """{channel: (role, num)} for a capture: its saved or corrected roles, else the legacy layout."""
+    meta = (getattr(data, "meta", None) or {}).get("roles") or legacy_meta(data.channels)
+    out = {}
+    for n in data.channels:
+        r = meta.get(str(n)) or {"role": "other", "num": None}
+        key = r.get("role") if r.get("role") in ROLES else "other"
+        out[int(n)] = (key, r.get("num"))
+    return out
