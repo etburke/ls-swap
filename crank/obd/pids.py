@@ -55,6 +55,15 @@ def read_order(supported) -> list[int]:
     return list(LIVE_PIDS) + [p for p in PIDS if p not in LIVE_PIDS and p in supported]
 
 
+def poll_groups(supported) -> list[tuple[int, ...]]:
+    """Requests a poll watch cycles through: the supported POLL_PIDS in fives, each led by RPM (0C), so every
+    request carries RPM and none carries more than the six PIDs a CAN request allows."""
+    others = [p for p in POLL_PIDS if p in supported]
+    if not others:
+        return [(0x0C,)]
+    return [(0x0C, *others[i:i + 5]) for i in range(0, len(others), 5)]
+
+
 FREEZE_PIDS = (0x0C, 0x05, 0x04, 0x06, 0x07, 0x0B, 0x0D, 0x0F, 0x11)
 
 DTC_DESCRIPTIONS = {

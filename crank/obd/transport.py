@@ -420,8 +420,14 @@ class SimTransport(Transport):
         """A multi-PID mode 01 reply: 41 then (pid, data) for each supported PID asked; None if none are."""
         if not self.sc.multi_pid:
             return bytes([0x7F, 0x01, 0x12])
+        for p in pids:                                  # a PID the PCM is busy on/refuses spoils the whole request
+            nrc = self._nrc_for(self.sc.pcm_header, self.sc.pid_nrc, f"01{p:02X}")
+            if nrc is not None:
+                return bytes([0x7F, 0x01, nrc])
         out = bytearray([0x41])
         for p in pids:
+            if f"01{p:02X}" in self.sc.no_answer_pids:
+                continue
             one = self._pcm_body(0x01, p)
             if isinstance(one, bytes) and one[0] == 0x41:
                 out += one[1:]

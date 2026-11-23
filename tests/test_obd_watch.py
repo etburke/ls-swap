@@ -84,7 +84,8 @@ def test_poll_watch_samples_010C_and_atrv_every_fourth_cycle(tmp_path):
     rpm = [r for r in rows if r["cmd"] == "010C"]
     volts = [r for r in rows if r["cmd"] == "ATRV"]
     assert volts and len(rpm) >= 4 * len(volts)
-    assert all(set(r) == {"t", "cmd", "raw", "value", "unit", "reason"} for r in rows)
+    assert all(set(r) == {"t", "cmd", "req", "raw", "value", "unit", "reason"} for r in rows if r["cmd"] != "ATRV")
+    assert all(set(r) == {"t", "cmd", "raw", "value", "unit", "reason"} for r in volts)
     s = job.meta["summary"]
     assert s["rpm"]["source"] == "010C (official)" and s["samples"] == len(rpm)
     assert 150 <= s["rpm"]["max"] <= 250 and s["voltage"] == {"min": 12.4, "max": 12.4}
@@ -247,7 +248,8 @@ def test_summaries_on_handmade_rows():
     p = summarize_poll(poll, 1.0)
     assert p == {"samples": 2, "rpm": {"source": "010C (official)", "answered": 1, "max": 180.0,
                                        "median_nonzero": 180.0, "first_nonzero_s": 0.5},
-                 "voltage": {"min": 11.9, "max": 11.9}}
+                 "voltage": {"min": 11.9, "max": 11.9},
+                 "pids": {"0C": {"name": "Engine RPM", "unit": "rpm", "answered": 1, "min": 180.0, "max": 180.0}}}
     assert summarize_raw([], 0.0)["engine_speed"] is None and summarize_poll([], 0.0)["voltage"] is None
 
 
@@ -318,3 +320,45 @@ def test_reset_and_linked_are_public(tmp_path):
     assert job.reset is True and job.linked is False
     linked, _, _ = make(tmp_path, seconds=None, until=lambda: False)
     assert linked.linked is True and linked.reset is False
+
+
+def test_poll_groups_lead_with_rpm_and_hold_six():
+    from crank.obd.pids import poll_groups
+    sup = {0x0C, 0x0E, 0x11, 0x45, 0x47, 0x49, 0x4A, 0x4C, 0x42}
+    groups = poll_groups(sup)
+    assert all(g[0] == 0x0C and len(g) <= 6 for g in groups)
+    assert {p for g in groups for p in g} == sup
+    assert poll_groups({0x0C}) == [(0x0C,)] and poll_groups(set()) == [(0x0C,)]
+
+
+def test_poll_watch_records_many_pids(tmp_path):
+    job = run(tmp_path, "crank_poll_multi", "poll", seconds=1.5)
+    _, rows = SessionStore(tmp_path).open("s").load_watch(job.meta["id"])
+    cmds = {r["cmd"] for r in rows}
+    assert {"010C", "010E", "014C"} <= cmds
+    rpm = [r for r in rows if r["cmd"] == "010C"]
+    assert rpm and all(len(r["req"]) > 4 and "0C" in [r["req"][i:i + 2] for i in range(2, len(r["req"]), 2)]
+                       for r in rpm)
+    s = job.meta["summary"]
+    assert "4C" in s["pids"] and s["pids"]["4C"]["unit"] == "%" and s["rpm"]["answered"] > 0
+    assert 150 <= s["rpm"]["max"] <= 250
+
+
+def test_poll_watch_falls_back_to_single_pids(tmp_path):
+    job = run(tmp_path, "no_multi_pid", "poll", seconds=1.5)
+    _, rows = SessionStore(tmp_path).open("s").load_watch(job.meta["id"])
+    assert any("one PID at a time" in n for n in job.meta["notes"])
+    singles = [r for r in rows if r.get("req") and len(r["req"]) == 4]
+    assert any(r["cmd"] == "010C" and r["value"] is not None for r in singles)
+    assert any(r["cmd"] != "010C" and r["value"] is not None for r in singles)
+
+
+def test_a_pid_missing_from_a_group_reply_is_no_answer(tmp_path):
+    sim = SimTransport("crank_poll_multi")
+    sim.sc.no_answer_pids = ("014C",)
+    job = run(tmp_path, "crank_poll_multi", "poll", seconds=0.6, transport=Recording(sim))
+    _, rows = SessionStore(tmp_path).open("s").load_watch(job.meta["id"])
+    thr = [r for r in rows if r["cmd"] == "014C"]
+    assert thr and all(r["value"] is None and r["reason"] == "no_answer" for r in thr)
+    assert any(r["cmd"] == "010C" and r["value"] is not None for r in rows)
+    assert not any("one PID at a time" in n for n in job.meta["notes"])
