@@ -12,6 +12,7 @@ from crank.controller import get_controller, lan_ip
 from crank.mcp_server import ensure_mcp_server
 from crank.model import CaptureSettings, ChannelConfig, Thresholds
 from crank.procedure import STEPS
+from crank.roles import ROLES, role_label
 from crank.report import build_figure, build_overlay, to_csv
 from crank.scope import RigolScope, ScopeError
 from crank.sim import SCENARIOS
@@ -24,6 +25,16 @@ import watch_ui
 NEW_TAB = "＋"                                         # last session tab: shows the create form
 PAGES = ["Case", "Capture", "Results", "Watches", "Guided tests", "Compare", "Log"]
 SEVERITY_ICON = {"fail": "🔴", "warn": "🟠", "info": "🟢"}
+ROLE_NAMES = [r.name for r in ROLES.values()]
+ROLE_BY_NAME = {r.name: k for k, r in ROLES.items()}
+
+
+def _num(v):
+    """A cell or widget number as int, or None for blank / NaN."""
+    try:
+        return None if v is None or v != v or v == "" else int(v)
+    except (TypeError, ValueError):
+        return None
 
 is_remote = st.query_params.get("page") == "remote"
 st.set_page_config(page_title="Crank Remote" if is_remote else "Crank Test Harness",
@@ -169,15 +180,21 @@ with st.sidebar:
 def page_capture():
     st.header("Capture")
     s: CaptureSettings = ss.settings
-    st.info("Wiring: CH1 crank at the PCM pin, CH2 crank at the sensor connector, CH3 5V reference, "
-            "CH4 PCM low reference. All probe grounds to battery negative.")
+    st.info("Set each channel's Role to what its probe is on (pin hints are in Results → Channel roles). "
+            "All probe grounds to battery negative.")
     job: CaptureJob | None = ss.job
     busy = bool(job and job.running)
 
     with st.expander("Channels and settings", expanded=not busy):
+        shown = [{**dataclasses.asdict(c), "role": ROLES.get(c.role, ROLES["other"]).name} for c in s.channels]
         rows = st.data_editor(
-            [dataclasses.asdict(c) for c in s.channels], key="chan_editor", hide_index=True,
-            disabled=busy, column_config={"n": st.column_config.NumberColumn("CH", disabled=True)})
+            shown, key="chan_editor", hide_index=True, disabled=busy,
+            column_config={"n": st.column_config.NumberColumn("CH", disabled=True),
+                           "role": st.column_config.SelectboxColumn("role", options=ROLE_NAMES, required=True),
+                           "num": st.column_config.NumberColumn("num", min_value=1, max_value=8, step=1,
+                                                                help="Cylinder / circuit for EST, injector, "
+                                                                     "TP, pedal; coil low ref 1 = odd bank")})
+        rows = [{**r, "role": ROLE_BY_NAME.get(r.get("role"), "other"), "num": _num(r.get("num"))} for r in rows]
         c1, c2, c3, c4 = st.columns(4)
         seconds = c1.number_input("Capture length (s)", 1.0, 30.0, s.seconds, disabled=busy)
         pretrig = c2.number_input("Pre-trigger (fraction)", 0.0, 0.9, s.pretrig, disabled=busy)
@@ -253,7 +270,8 @@ def show_verdict(a):
 
 
 def summary_row(a):
-    r = a.reports.get("ch1") or next(iter(a.reports.values()), None)
+    ecm = next((f"ch{n}" for n in sorted(a.roles) if a.roles[n][0] == "crank_ecm"), "ch1")
+    r = a.reports.get(ecm) or next((v for k, v in a.reports.items() if k != "ecm_rel"), None)
     s = a.supply
     return {
         "edges (CH1)": r.n_edges if r else None,
@@ -277,6 +295,45 @@ def thresholds_editor():
         ss.thresholds = Thresholds(**vals)
 
 
+def roles_editor(sess, cid: str) -> None:
+    """Correct what each channel of a saved capture was connected to; saving re-analyses and logs it in the case."""
+    data = sess.load_capture(cid)
+    src = {"corrected": "corrected", "saved": "saved with the capture", "legacy": "legacy layout"}[
+        data.meta["roles_source"]]
+    current = {int(n): (r["role"], r.get("num")) for n, r in data.meta["roles"].items()}
+    with st.expander(f"Channel roles ({src})", expanded=data.meta["roles_source"] == "legacy"):
+        chosen = {}
+        for n in sorted(data.channels):
+            key, num = current.get(n, ("other", None))
+            c1, c2, c3 = st.columns([3, 4, 1])
+            c1.markdown(f"**CH{n}** · {data.labels.get(n, '')}")
+            name = c2.selectbox(f"CH{n} role", ROLE_NAMES, index=ROLE_NAMES.index(ROLES[key].name),
+                                key=f"role_{cid}_{n}", label_visibility="collapsed",
+                                help=ROLES[key].pins or None)
+            k = ROLE_BY_NAME[name]
+            num_v = c3.number_input(f"CH{n} no.", 0, 8, num or 0, key=f"num_{cid}_{n}",
+                                    label_visibility="collapsed", disabled=not ROLES[k].numbered)
+            chosen[n] = (k, (num_v or None) if ROLES[k].numbered else None)
+            if ROLES[k].pins:
+                c2.caption(ROLES[k].pins)
+        if st.button("Save roles and re-analyse", key="save_roles"):
+            changed = {n: r for n, r in chosen.items() if r != current.get(n)}
+            if not changed:
+                st.info("The roles are unchanged.")
+                return
+            try:
+                sess.set_capture_roles(cid, changed)
+            except ValueError as e:
+                st.error(str(e))
+                return
+            a = analyze_capture(sess.load_capture(cid), ss.thresholds)
+            what = "; ".join(f"CH{n}: {role_label(*r)}" for n, r in sorted(changed.items()))
+            Case(sess).append("observation", f"Capture {cid} re-analysed with corrected roles ({what}): "
+                              + "; ".join(f.title for f in a.findings), {}, {"capture": cid})
+            st.success("Roles saved; the capture was re-analysed and the case notes it. "
+                       "The original verdict stays in the timeline.")
+
+
 def page_results():
     st.header("Results")
     sess = session()
@@ -289,6 +346,7 @@ def page_results():
     cid = st.selectbox("Capture", ids, index=ids.index(default), key="result_pick",
                        format_func=lambda i: f"{i}: {next(c['label'] for c in caps if c['id'] == i)}")
     thresholds_editor()
+    roles_editor(sess, cid)
     data = sess.load_capture(cid)
     a = analyze_capture(data, ss.thresholds)
     show_verdict(a)
@@ -305,6 +363,11 @@ def page_results():
             case.append("observation", text, {}, {"capture": cid})
             st.success("Added to the case timeline.")
     st.dataframe([summary_row(a)], hide_index=True)
+    if a.basic:
+        st.caption("Other channels (no checks apply to these roles)")
+        st.dataframe([{"channel": f"{k.upper()} · {role_label(*a.roles[int(k[2:])])}",
+                       **{c: (round(v, 3) if isinstance(v, float) else v) for c, v in b.items()}}
+                      for k, b in a.basic.items()], hide_index=True)
 
     t0, t1 = float(data.t[0]), float(data.t[-1])
     x0, x1 = st.slider("Time window (s)", t0, t1, (t0, t1), key="window")
