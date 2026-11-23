@@ -19,9 +19,10 @@ import case_ui
 import conn_ui
 import mcp_ui
 import remote
+import watch_ui
 
 NEW_TAB = "＋"                                         # last session tab: shows the create form
-PAGES = ["Case", "Capture", "Results", "Guided tests", "Compare", "Log"]
+PAGES = ["Case", "Capture", "Results", "Watches", "Guided tests", "Compare", "Log"]
 SEVERITY_ICON = {"fail": "🔴", "warn": "🟠", "info": "🟢"}
 
 is_remote = st.query_params.get("page") == "remote"
@@ -396,4 +397,5 @@ def page_compare():
 
 
 {"Case": lambda: case_ui.render(ss), "Capture": page_capture, "Results": page_results,
+ "Watches": lambda: watch_ui.page_watches(ctrl),
  "Guided tests": page_guided, "Compare": page_compare, "Log": lambda: conn_ui.render_log(ctrl)}[ss.page]()
