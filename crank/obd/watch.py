@@ -10,6 +10,7 @@ from . import protocol as P
 from .adapter import clean_id, parse_voltage
 from .canframes import DECODERS, decode, parse_line
 from .errors import ObdAdapterError, ObdCancelled, ObdMonitorStuck, ObdProtocolError, ObdVehicleSilent
+from .pids import PIDS, POLL_PIDS, poll_groups
 from .reader import INIT
 
 MODES = ("raw", "poll")
@@ -18,6 +19,7 @@ DEFAULT_SECONDS = 20.0
 FIRST_TIMEOUT = 20.0                     # the first OBD request may start a protocol search
 POLL_PERIOD = 0.1                        # shortest poll cycle, so a fast adapter does not flood the file
 ATRV_EVERY = 4
+GROUP_GIVE_UP = 4                        # group requests that may go unanswered before any works, then single PIDs
 MONITOR_GRACE = 0.2                      # ATMA counts as accepted after this long with no error
 SILENT_TEXT = "The vehicle did not answer. Is the key on?"
 END_NOTES = {
@@ -25,6 +27,7 @@ END_NOTES = {
     "reset": "The adapter reset during the watch; its settings were re-applied.",
     "silent": "No CAN traffic for 1 s; the watch ended early.",
     "prompt": "The adapter ended monitor mode on its own.",
+    "single_pid": "The PCM did not accept multi-PID requests; polled one PID at a time (RPM every other request).",
 }
 
 
@@ -61,10 +64,23 @@ def summarize_poll(rows: list[dict], started: float) -> dict:
     answered = [(r["t"], r["value"]) for r in rpm if r["value"] is not None]
     volts = [r["value"] for r in rows if r["cmd"] == "ATRV" and r["value"] is not None]
     values = [v for _, v in answered]
+    pids: dict = {}
+    for r in rows:
+        cmd = r.get("cmd", "")
+        if len(cmd) != 4 or not cmd.startswith("01"):
+            continue
+        pid = int(cmd[2:], 16)
+        e = pids.setdefault(cmd[2:], {"name": PIDS[pid].name if pid in PIDS else cmd, "unit": r.get("unit", ""),
+                                      "answered": 0, "min": None, "max": None})
+        v = r.get("value")
+        if v is not None:
+            e["answered"] += 1
+            e["min"] = v if e["min"] is None else min(e["min"], v)
+            e["max"] = v if e["max"] is None else max(e["max"], v)
     return {"samples": len(rpm),
             "rpm": {"source": "010C (official)", "answered": len(answered), "max": max(values, default=None),
                     "median_nonzero": _median_nonzero(values), "first_nonzero_s": _first_nonzero_s(answered, started)},
-            "voltage": {"min": min(volts), "max": max(volts)} if volts else None}
+            "voltage": {"min": min(volts), "max": max(volts)} if volts else None, "pids": pids}
 
 
 class _Interrupt:
@@ -223,34 +239,81 @@ class WatchJob:
         self.monitoring.set()
         self._check_until()
 
-    def _poll_rpm(self, t: float, timeout: float) -> dict:
-        raw, value, reason = "", None, ""
+    def _support_map(self, timeout: float) -> set[int]:
+        """The PIDs the PCM advertises (0100, then 0120/0140/0160 while each map flags the next). An unreadable
+        first map means RPM alone is polled, as before."""
+        supported: set[int] = set()
+        for base in (0x00, 0x20, 0x40, 0x60):
+            if base and base not in supported:
+                break
+            try:
+                r = P.ecu_reply(self._send(f"01{base:02X}", timeout), 0x01, base, ecu="7E8")
+            except ObdProtocolError:
+                r = None
+            except ObdAdapterError as e:
+                if not e.transient:
+                    self._reset = e.reset
+                    raise
+                r = None
+            timeout = 5.0
+            if r is None or r[1] is not None:
+                break
+            supported |= P.supported_pids(base, r[0])
+        return supported
+
+    def _poll(self, pids: tuple[int, ...], t: float, timeout: float) -> str:
+        """Send one request for `pids` and record one row per PID. Returns "ok"; "refused" (a negative answer that
+        is not busy, or a multi-PID reply without RPM); "busy"; or "no_answer" (NO DATA, an unreadable reply or an
+        adapter error: transient things, common while cranking)."""
+        req, raw, data, reason = P.request_multi(pids), "", None, ""
         try:
-            raw = self._send("010C", timeout)
-            r = P.ecu_reply(raw, 0x01, 0x0C, ecu="7E8")
-            if r is None:
+            raw = self._send(req, timeout)
+            msgs = P.ecu_messages(raw)
+            m = msgs.get("7E8") if msgs else None
+            if not m:
                 reason = "no_answer"
-            elif r[1] is not None:
-                reason = "busy" if r[1] in P.BUSY_NRC else "refused"
+            elif m[0] == 0x7F and len(m) >= 3:
+                reason = "busy" if m[2] in P.BUSY_NRC else "refused"
+            elif m[0] == 0x41:
+                data = P.split_multi(m[1:], pids)
             else:
-                dec = P.decode_pid(0x0C, r[0])
-                value, reason = (dec[0], "") if dec else (None, "no_answer")
+                reason = "no_answer"
+        except ObdProtocolError:
+            reason = "no_answer"
         except ObdAdapterError as e:
             if not e.transient:
                 self._reset = e.reset
                 raise
             reason = "adapter_error"
-        if value is not None:
-            self.latest_rpm, self.max_rpm = value, max(value, self.max_rpm or 0.0)
-        return {"t": t, "cmd": "010C", "raw": raw.strip(), "value": value, "unit": "rpm", "reason": reason}
+        for pid in pids:
+            value, why = None, reason
+            if data is not None:
+                dec = P.decode_pid(pid, data[pid]) if pid in data else None
+                value, why = (dec[0], "") if dec else (None, "no_answer")
+            if pid == 0x0C and value is not None:
+                self.latest_rpm, self.max_rpm = value, max(value, self.max_rpm or 0.0)
+            self._record({"t": t, "cmd": f"01{pid:02X}", "req": req, "raw": raw.strip(), "value": value,
+                          "unit": PIDS[pid].unit, "reason": why})
+        if reason in ("busy", "refused"):
+            return reason
+        if reason:
+            return "no_answer"
+        if len(pids) > 1 and 0x0C not in data:
+            return "refused"
+        return "ok"
 
     def _run_poll(self) -> str:
         if self.cold:
             for cmd in INIT:
                 self._send(cmd)
         self._send("ATH1")                           # PID replies are parsed by header; a reset clears it
+        supported = self._support_map(FIRST_TIMEOUT)
+        groups = poll_groups(supported)
+        others = [p for p in POLL_PIDS if p in supported]
         self.recording_at = time.time()
-        deadline, n = time.monotonic() + self.limit, 0
+        deadline, n, single, k = time.monotonic() + self.limit, 0, len(groups[0]) == 1, 0
+        refusals = misses = 0                         # consecutive refused / not-ok group requests
+        group_ok = False                              # has any group request been answered properly?
         while True:
             self._check_until()
             if self._halt.is_set():
@@ -258,9 +321,25 @@ class WatchJob:
             cycle = time.monotonic()
             if cycle >= deadline:
                 return "time"
-            row = self._poll_rpm(time.time(), FIRST_TIMEOUT if n == 0 else 5.0)
-            self._record(row)
-            if row["value"] is not None:
+            if single:                                # RPM every other request, the others in turn between
+                pids = (0x0C,) if (k % 2 == 0 or not others) else (others[(k // 2) % len(others)],)
+                k += 1
+            else:
+                pids = groups[n % len(groups)]
+            verdict = self._poll(pids, time.time(), FIRST_TIMEOUT if n == 0 else 5.0)
+            if not single and len(pids) > 1:
+                if verdict == "ok":
+                    group_ok, refusals, misses = True, 0, 0
+                else:
+                    refusals += verdict == "refused"
+                    misses += 1
+                # an explicit refusal twice running, or groups never once answered: a dropout or a busy spell
+                # after groups have worked is weathered, not taken as the PCM refusing them
+                if refusals >= 2 or (not group_ok and misses >= GROUP_GIVE_UP):
+                    single = True
+                    self.notes.append(END_NOTES["single_pid"])
+            if self.latest_rpm is not None and any(r["cmd"] == "010C" and r["value"] is not None
+                                                   for r in self._rows[-len(pids):]):
                 self.monitoring.set()                # the PCM is answering 010C: recording for real
             n += 1
             if n % ATRV_EVERY == 0:

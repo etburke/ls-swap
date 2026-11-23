@@ -148,39 +148,12 @@ WATCH_MODES = {"Raw CAN (default)": "raw", "Poll RPM": "poll"}
 
 
 def _watch_results(ctrl, job) -> None:
-    """The finished watch: its one-line summary, RPM over time and the ID inventory (never claims more than
-    best-effort for decoded CAN values)."""
-    import pandas as pd
-    from crank.summary import describe
-    meta = job.meta
-    if not meta:
+    """The finished watch, shown as the Watches page shows it: case line, PID picker and chart (never claims more
+    than best-effort for decoded CAN values)."""
+    from watch_ui import render_watch
+    if not job.meta:
         return
-    for e in ctrl.case().events():
-        if e.type == "watch" and e.refs.get("watch") == meta["id"]:
-            st.success(describe(e))
-            break
-    _, rows = ctrl.store.open(job.session_name).load_watch(meta["id"])
-    t0 = meta.get("started") or 0.0
-    if meta["mode"] == "poll":
-        points = [(r["t"] - t0, r["value"]) for r in rows if r.get("cmd") == "010C" and r.get("value") is not None]
-        name = "RPM, 010C (official)"
-    else:
-        points = [(r["t"] - t0, d["value"]) for r in rows for d in r.get("decoded", [])
-                  if d["name"] == "Engine speed"]
-        name = "Engine speed rpm (best-effort)"
-    if points:
-        st.line_chart(pd.DataFrame({"s": [p[0] for p in points], name: [p[1] for p in points]}), x="s", y=name)
-        caption = "Seconds from the start of recording."
-        if meta.get("trigger_t"):
-            caption += f" Scope trigger at {meta['trigger_t'] - t0:.2f} s."
-        st.caption(caption)
-    else:
-        st.caption("No engine speed values were seen.")
-    ids = (meta.get("summary") or {}).get("ids") or {}
-    if ids:
-        st.caption("CAN IDs seen")
-        st.dataframe(pd.DataFrame([{"ID": i, "Frames": v["count"], "Hz": v["hz"]} for i, v in ids.items()]),
-                     hide_index=True)
+    render_watch(ctrl, job.session_name, job.meta["id"], f"case_watch_{job.meta['id']}")
 
 
 def watch_panel(ctrl, key: str, compact: bool = False) -> None:

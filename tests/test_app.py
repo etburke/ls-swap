@@ -701,7 +701,7 @@ def test_watch_panel_runs_a_sim_watch_and_shows_the_summary(at_conn):
         assert not at_conn.exception
         assert any("OBD watch" in m.value and "best-effort" in m.value for m in at_conn.success)
         assert at_conn.dataframe
-        assert any("Seconds from the start of recording" in c.value for c in at_conn.caption)
+        assert at_conn.get("plotly_chart") and any("best-effort" in c.value for c in at_conn.caption)
     finally:
         _finish_watch(ctrl)
 
@@ -791,3 +791,30 @@ def test_remote_page_has_watch_checkbox_and_panel(at_conn):
     at_conn.run()
     assert at_conn.checkbox(key="remote_arm_watch") is not None
     assert at_conn.button(key="remote_watch_start").disabled
+
+
+def _saved_poll_watch(scenario="crank_poll_multi", seconds=1.0):
+    from crank.obd.watch import WatchJob
+    ctrl = get_controller()
+    t = SimTransport(scenario)
+    t.open()
+    job = WatchJob(t, "poll", ctrl.store.open(ctrl.session_name).new_watch(), seconds=seconds, sim=True)
+    job.start()
+    job.join(10)
+    return job.meta["id"]
+
+
+def test_watches_page_lists_and_charts_a_saved_watch(at):
+    wid = _saved_poll_watch()
+    _go(at, "Watches")
+    assert any(wid in str(o) for o in at.selectbox(key="watch_pick").options)
+    pick = at.multiselect(key="watch_page_pids")
+    assert any("Engine RPM" in str(o) for o in pick.value) and any("Commanded throttle" in str(o) for o in pick.options)
+    assert at.get("plotly_chart")
+    pick.set_value([o for o in pick.options if "Engine RPM" in o or "Commanded throttle" in o]).run()
+    assert not at.exception and at.get("plotly_chart")
+
+
+def test_watches_page_with_no_watches_is_friendly(at):
+    _go(at, "Watches")
+    assert any("No OBD watches" in i.value for i in at.info)

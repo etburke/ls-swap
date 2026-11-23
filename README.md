@@ -63,6 +63,9 @@ The sidebar picks **Simulator** or **Real scope**, and the session you're workin
   any SCPI commands the scope rejected.
 - **Results:** the verdict, summary numbers, a zoomable plot of all channels with problem events marked, an
   event table, editable analysis thresholds, and `.npz` / CSV downloads.
+- **Watches:** reopen any saved OBD watch in the session and chart the PIDs you pick (engine RPM by default),
+  one plot per unit on a shared time axis. For a watch linked to a capture, the RPM plot also shows the capture's
+  per-revolution crank RPM from scope CH1 and marks the scope trigger.
 - **Guided tests:** a step-by-step procedure (static baseline, key-on engine-off, baseline cranking capture,
   capture after each change, balancer and reluctor check) with fields for your multimeter readings,
   saved with the session.
@@ -106,7 +109,7 @@ The simulator has thirty-one scenarios (healthy, a stored P2119 with 0 RPM, many
 failure modes, and five multi-ECU ones: `pcm_and_trans`, `interleaved_multiframe`, `same_code_two_ecus`, `pcm_not_7e8`,
 `trans_rejects_mode`, `slow_adapter` (every reply takes about a second, so you can try Stop and Cancel without hardware), `heartbeat_drop` (the adapter stops answering its heartbeat after three beats, so you can watch Dropped and Relink), and five for adapter trouble, below). **Real adapter** reads classic-Bluetooth ELM327/STN adapters (for example the OBDLink MX+) through
 a serial port: pair the adapter in macOS Bluetooth settings first, then pick its port (or Auto-detect). Only
-read-only requests are ever sent: modes 01, 02, 03, 07 and 0A plus a fixed set of adapter setup commands. Anything
+read-only requests are ever sent: modes 01 (one to six PIDs per request), 02, 03, 07 and 0A plus a fixed set of adapter setup commands. Anything
 that could write adapter memory or put it to sleep (`ATPP`, `STSAVCAL`, `STSLEEP`, ...) is refused before it reaches
 the port. Reads keep every ECU's answers apart: trouble codes from all ECUs are recorded and labeled with the ECU that
 reported them (shown when more than one ECU answered), while live values, the freeze frame and the supported-PID map
@@ -155,8 +158,12 @@ read-only requests as a read; it never transmits on the bus.
   lead, not a measurement; absence of `0C9` proves nothing by itself. For every saved watch the raw frames are
   kept, one JSON line each, in `sessions/<name>/watches/NNN.jsonl` (with `NNN.json` for the summary), so a better
   decoder can be run on them later (a cancelled watch, or one that recorded nothing, saves no file). The result shows RPM over time and an inventory of the CAN IDs heard. Raw mode needs a CAN vehicle.
-- **Poll RPM.** Asks the official `010C` (engine RPM) every cycle and the adapter's own voltage (`ATRV`) every 4th
-  cycle. The RPM is labelled `010C (official)`. It samples slower than raw mode, but it is the PCM's own answer.
+- **Poll PIDs.** Reads the PCM's supported-PID maps, then asks for up to six PIDs per request, engine RPM (`010C`)
+  in every one and the other supported PIDs (throttle, pedal, commanded throttle, timing advance, MAP, voltage,
+  ...) taking turns in the other five slots, about ten requests a second, plus the adapter's own voltage (`ATRV`)
+  every 4th cycle. Every value is official OBD data, labelled with its PID (`010C (official)`). If the PCM refuses
+  multi-PID requests twice in a row, the watch says so and polls one PID at a time for the rest of the run (RPM
+  every other request). Each value is saved as its own line, with the request it came from.
 
 Length is 1 to 120 s (default 20 s). **Stop** ends the watch and keeps what was recorded; **Cancel** throws it
 away and saves nothing. A watch that records nothing (for example the key is off, "The vehicle did not answer")
@@ -176,7 +183,7 @@ capture lists its watch and the watch its capture, with the trigger time. If the
 runs anyway and the page says why.
 
 **MCP.** Read tools: `watch_progress` (state, mode, whether it is recording, seconds, line and frame counts,
-latest and highest RPM with `rpm_source`: best-effort raw decode or official `010C`), `list_watches` and `get_watch` (metadata, summary, ID inventory and a downsampled engine-speed series). With
+latest and highest RPM with `rpm_source`: best-effort raw decode or official `010C`), `list_watches` and `get_watch` (metadata, summary, ID inventory, the PIDs the watch holds, and a downsampled series for one PID: `pid`, default `0C`). With
 "Allow AI control": `obd_watch` (mode, seconds, label), `obd_watch_stop`, `obd_watch_cancel`, and
 `arm_capture(watch=true, watch_mode=...)`. After `obd_watch` the assistant waits for `monitoring: true` in
 `watch_progress` before asking you to crank.

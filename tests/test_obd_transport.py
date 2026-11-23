@@ -259,3 +259,31 @@ def test_poll_010C_follows_the_crank_curve_in_cranking_rpm_seen():
     assert 180 <= raw / 4 <= 220
     assert int(sim("cranking_no_rpm", headers=False).send("010C")[4:], 16) == 0
     assert sim("cranking_rpm_seen", headers=False).send("ATDPN") == "A6"
+
+
+def test_sim_multi_pid_reply_splits_back():
+    from crank.obd import protocol as P
+    t = SimTransport("healthy"); t.open(); t.send("ATH1")
+    msg = P.ecu_messages(t.send("010C0E4C"))["7E8"]
+    assert msg[0] == 0x41 and set(P.split_multi(msg[1:], [0x0C, 0x0E, 0x4C])) == {0x0C, 0x0E, 0x4C}
+
+
+def test_sim_multi_pid_leaves_out_unsupported_pids():
+    from crank.obd import protocol as P
+    t = SimTransport("healthy"); t.open(); t.send("ATH1")
+    msg = P.ecu_messages(t.send("01100C"))["7E8"]                    # 10 (MAF) is not in the healthy sim
+    assert set(P.split_multi(msg[1:], [0x0C, 0x10])) == {0x0C}
+
+
+def test_sim_no_multi_pid_refuses_groups_but_answers_singles():
+    from crank.obd import protocol as P
+    t = SimTransport("no_multi_pid"); t.open(); t.send("ATH1")
+    assert P.ecu_messages(t.send("010C0E"))["7E8"][:3] == bytes([0x7F, 0x01, 0x12])
+    assert P.ecu_reply(t.send("010C"), 0x01, 0x0C, ecu="7E8")[1] is None
+
+
+def test_sim_crank_poll_multi_follows_the_crank_curve_inside_a_group():
+    from crank.obd import protocol as P
+    t = SimTransport("crank_poll_multi"); t.open(); t.send("ATH1")
+    first = P.split_multi(P.ecu_messages(t.send("010C0E"))["7E8"][1:], [0x0C, 0x0E])
+    assert first[0x0C] == b"\x00\x00"                               # 0 rpm before the crank starts at 0.3 s
