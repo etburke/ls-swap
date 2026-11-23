@@ -18,6 +18,25 @@ a real crank, then analyzes them and says where the problem most likely is.
 | CH3 | 5V reference at the sensor connector |
 | CH4 | PCM low reference vs battery negative |
 
+## Channel roles
+
+The table at the top is the classic wiring, and the default roles. Each capture records the role of every channel,
+and the analysis follows the roles, not the channel numbers, so probes can go anywhere:
+
+- **Crank signal at ECM** (E38 J2-68) and **at sensor** (CKP A): edge, gap, revolution and runt checks; with both,
+  the two-point harness comparison.
+- **5V references** (crank J2-2 / CKP C, cam J2-44 / CMP A): the sag check, on the worst one.
+- **Low references and grounds** (crank J2-69, cam J2-66, coil odd/even J2-78/79, ECM ground J1-73): the
+  ground-lift check, on the worst one. With crank at ECM and crank low reference both present, the analysis also
+  checks the crank signal as the ECM sees it (the difference of the two).
+- **Everything else** (cam signal J2-64, ignition control IC 1-8, injector low side 1-8, ECM ignition and battery
+  feeds, throttle position and motor, pedal, MAP, fuel pump and starter relay control, other): plotted, with min /
+  median / max, pulse count and median pulse width; no verdicts.
+
+Pins are from a 2008 Vortec 5.3 E38 pinout (lt1swap.com); it does not say which cylinder each coil driver feeds, so
+the number on an ignition-control channel is the circuit probed. Captures from before roles use the classic layout
+until corrected.
+
 ## How it works
 
 1. **Capture.** You arm the scope (single-shot, triggered on the first crank edge) and crank the engine.
@@ -60,9 +79,12 @@ The sidebar picks **Simulator** or **Real scope**, and the session you're workin
 - **Case:** the vehicle profile, a quick-add form for symptoms, observations, codes, measurements, changes and
   suspects, a suspects board (open, ruled out, confirmed), the timeline, and the hand-off report. It also has **Read from OBD**, which records codes, freeze frame and live values from the vehicle.
 - **Capture:** channel table and settings, an Arm button, a live "crank now" banner, Cancel, and a log of
-  any SCPI commands the scope rejected.
-- **Results:** the verdict, summary numbers, a zoomable plot of all channels with problem events marked, an
-  event table, editable analysis thresholds, and `.npz` / CSV downloads.
+  any SCPI commands the scope rejected. Each channel has a **role**: what its probe is on (see Channel roles).
+- **Results:** the verdict, summary numbers, a zoomable plot of all channels (titled by role) with problem events
+  marked, numbers for channels no check applies to, an event table, editable analysis thresholds, and `.npz` / CSV
+  downloads. **Channel roles** corrects what a saved capture's channels were connected to: saving re-analyses it
+  and adds a "re-analysed with corrected roles" observation to the case (the original verdict stays). The
+  correction is stored in the capture's `.json`; the scope data is never rewritten.
 - **Watches:** reopen any saved OBD watch in the session and chart the PIDs you pick (engine RPM by default),
   one plot per unit on a shared time axis. For a watch linked to a capture, the RPM plot also shows the capture's
   per-revolution crank RPM from scope CH1 and marks the scope trigger.
@@ -210,8 +232,9 @@ window of one channel; runts survive the downsampling), `compare_captures`, `rea
 different thresholds; nothing is saved), `get_capture_progress`, `obd_progress`, `get_obd_log`, `watch_progress`, `list_watches`, `get_watch`.
 
 **Only while "Allow AI control" is on** (it is off every time the app starts): `arm_capture`, `cancel_capture`,
-`obd_connect`, `obd_disconnect`, `obd_relink`, `obd_read`, `obd_stop`, `obd_cancel`, `obd_watch`, `obd_watch_stop`, `obd_watch_cancel`, `add_case_note` and
-`set_suspect`. They act on the laptop's current session, mode, scenario and settings. Arming only arms: in
+`obd_connect`, `obd_disconnect`, `obd_relink`, `obd_read`, `obd_stop`, `obd_cancel`, `obd_watch`, `obd_watch_stop`, `obd_watch_cancel`, `add_case_note`,
+`set_suspect` and `set_capture_roles` (corrects a saved capture's channel roles and re-analyses it, as the Results
+page does). They act on the laptop's current session, mode, scenario and settings. Arming only arms: in
 Real-scope mode the assistant is told to ask you to crank. OBD reads keep every existing limit (read-only
 requests, never clears codes, real and simulated reads never mix in one case).
 

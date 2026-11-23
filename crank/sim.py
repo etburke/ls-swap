@@ -4,6 +4,7 @@ from __future__ import annotations
 import numpy as np
 
 from .model import CaptureData, default_channels
+from .roles import legacy_meta
 
 SCENARIOS = [
     "healthy", "no_signal", "ground_lift", "ref_sag", "runt_pulses",
@@ -74,4 +75,5 @@ def generate(scenario: str, seconds: float = 6.0, fs: int = 50_000,
 
     labels = {c.n: c.label for c in default_channels()}
     return CaptureData(t, {1: ch1, 2: ch2, 3: ref, 4: gnd}, labels,
-                       {"sim": True, "scenario": scenario, "fs": fs, "seed": seed})
+                       {"sim": True, "scenario": scenario, "fs": fs, "seed": seed,
+                        "roles": legacy_meta((1, 2, 3, 4))})

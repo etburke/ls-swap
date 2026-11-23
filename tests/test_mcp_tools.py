@@ -593,3 +593,28 @@ def test_get_watch_without_rpm_still_returns_summary_and_ids(ctrl, tools):
     assert out["ids"] == {"1A1": {"count": 1, "hz": 1.0}} and out["summary"]["frames"] == 1
     with pytest.raises(ToolError, match="4C"):
         tools.get_watch("001", pid="4C")
+
+
+def test_set_capture_roles_is_gated_and_logs(ctrl, tools):
+    cid = make_capture(ctrl, "healthy")
+    with pytest.raises(ToolError, match="Allow AI control"):
+        tools.set_capture_roles(cid, {"2": "cam"})
+    ctrl.ai_control = True
+    out = tools.set_capture_roles(cid, {"2": "cam", "3": "est:1"}, session="bench")
+    assert out["roles"]["2"] == "cam" and out["roles"]["3"] == "est:1"
+    assert not any(f["code"] == "harness_mismatch" for f in out["findings"])
+    a = tools.get_capture_analysis(cid, session="bench")
+    assert a["roles_source"] == "corrected" and a["roles"]["2"] == "cam" and "ch2" in a["basic"]
+    ev = [e for e in ctrl.case().events() if e.type == "observation" and e.source == "mcp"]
+    assert ev and "corrected roles" in ev[-1].text and "CH2: Cam signal" in ev[-1].text
+    with pytest.raises(ToolError, match="CH9"):
+        tools.set_capture_roles(cid, {"9": "cam"}, session="bench")
+    with pytest.raises(ToolError, match="cam"):
+        tools.set_capture_roles(cid, {"2": "camshaft"}, session="bench")
+
+
+def test_capture_analysis_reports_legacy_roles(ctrl, tools):
+    cid = make_capture(ctrl, "healthy")
+    a = tools.get_capture_analysis(cid, session="bench")
+    assert a["roles"] == {"1": "crank_ecm", "2": "crank_sensor", "3": "crank_ref", "4": "crank_low"}
+    assert a["roles_source"] == "saved" and a["basic"] == {}

@@ -136,7 +136,9 @@ def capture_snapshot(analysis) -> dict | None:
     """Freeze the verdict and headline numbers so reports do not depend on later analysis changes."""
     if analysis is None:
         return None
-    r = analysis.reports.get("ch1") or next(iter(analysis.reports.values()), None)
+    roles = getattr(analysis, "roles", None) or {}
+    ecm = next((f"ch{n}" for n in sorted(roles) if roles[n][0] == "crank_ecm"), "ch1")
+    r = analysis.reports.get(ecm) or next((v for k, v in analysis.reports.items() if k != "ecm_rel"), None)
     order = {"fail": 0, "warn": 1, "info": 2}
     sag, gnd = analysis.supply.get("ref_sag_mv"), analysis.supply.get("gnd_dev_mv")
     return {
@@ -327,3 +329,17 @@ def suggest_hypotheses(codes, existing_titles=()) -> list[str]:
         if s and s.lower() not in have and s not in out:
             out.append(s)
     return out
+
+
+def correct_capture_roles(session: Session, capture_id: str, changes: dict, thresholds=None, source: str = ""):
+    """Set corrected roles ({channel: (role, num)}) on a saved capture, re-analyse it, and add an observation
+    saying so (the capture's original verdict entry stays). Returns (analysis, event). ValueError for a bad
+    channel or role."""
+    from .analysis import analyze_capture
+    from .roles import role_label
+    session.set_capture_roles(capture_id, changes)
+    a = analyze_capture(session.load_capture(capture_id), thresholds)
+    what = "; ".join(f"CH{int(n)}: {role_label(*a.roles[int(n)])}" for n in sorted(changes, key=int))
+    ev = Case(session).append("observation", f"Capture {capture_id} re-analysed with corrected roles ({what}): "
+                              + "; ".join(f.title for f in a.findings), {}, {"capture": capture_id}, source=source)
+    return a, ev

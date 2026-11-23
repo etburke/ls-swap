@@ -50,3 +50,11 @@ def test_figure_with_no_pids_says_so(multi_watch_and_capture):
     meta, rows, _ = multi_watch_and_capture
     fig = build_watch_figure(meta, rows, [])
     assert not fig.data and any("Pick a PID" in a.text for a in fig.layout.annotations)
+
+
+def test_overlay_uses_the_crank_at_ecm_channel_wherever_it_is(multi_watch_and_capture):
+    meta, rows, cap = multi_watch_and_capture
+    moved = CaptureData(cap.t, {1: np.zeros_like(cap.channels[1]), 3: cap.channels[1]}, {1: "x", 3: "crank"},
+                        {"roles": {"1": {"role": "other", "num": None}, "3": {"role": "crank_ecm", "num": None}}})
+    assert "Scope CH1 (per rev)" in [tr.name for tr in build_watch_figure(meta, rows, [0x0C], moved).data] or \
+        any("Scope" in (tr.name or "") for tr in build_watch_figure(meta, rows, [0x0C], moved).data)

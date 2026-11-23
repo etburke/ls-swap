@@ -93,3 +93,40 @@ def test_load_watch_unknown_raises_keyerror(tmp_path):
         ses.load_watch("001")
     with pytest.raises(KeyError):
         ses.load_watch("../x")
+
+
+def test_new_capture_saves_roles(tmp_path):
+    ses = SessionStore(tmp_path).open("s")
+    cid = ses.add_capture(generate("healthy"))
+    got = ses.load_capture(cid)
+    assert got.meta["roles"]["2"] == {"role": "crank_sensor", "num": None} and got.meta["roles_source"] == "saved"
+
+
+def test_legacy_capture_without_roles(tmp_path):
+    data = generate("healthy")
+    data.meta.pop("roles", None)
+    ses = SessionStore(tmp_path).open("s")
+    cid = ses.add_capture(data)
+    got = ses.load_capture(cid)
+    assert got.meta["roles_source"] == "legacy" and got.meta["roles"]["3"]["role"] == "crank_ref"
+
+
+def test_correct_roles_survives_reload_and_json_missing(tmp_path):
+    ses = SessionStore(tmp_path).open("s")
+    cid = ses.add_capture(generate("healthy"))
+    (ses.path / "captures" / f"{cid}.json").unlink()
+    ses.set_capture_roles(cid, {2: ("cam", None), 3: ("est", 1)})
+    got = SessionStore(tmp_path).open("s").load_capture(cid)
+    assert got.meta["roles_source"] == "corrected"
+    assert got.meta["roles"]["2"]["role"] == "cam" and got.meta["roles"]["3"] == {"role": "est", "num": 1}
+    assert got.meta["roles"]["1"]["role"] == "crank_ecm"
+    assert [c["roles_corrected"] for c in SessionStore(tmp_path).open("s").list_captures()] == [True]
+
+
+def test_correct_roles_refuses_missing_channel_and_bad_role(tmp_path):
+    ses = SessionStore(tmp_path).open("s")
+    cid = ses.add_capture(generate("healthy"))
+    with pytest.raises(ValueError, match="CH5"):
+        ses.set_capture_roles(cid, {5: ("cam", None)})
+    with pytest.raises(ValueError):
+        ses.set_capture_roles(cid, {2: ("cam", 3)})

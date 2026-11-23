@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .model import CaptureData, Thresholds
+from .roles import ROLES, role_label, roles_of
 
 
 @dataclass
@@ -55,6 +56,8 @@ class Analysis:
     compare: dict | None
     correlations: list
     findings: list
+    roles: dict = field(default_factory=dict)         # channel -> (role, num)
+    basic: dict = field(default_factory=dict)         # "chN" -> min/median/max/pulses for non-analysed roles
 
     @property
     def codes(self) -> set:
@@ -133,22 +136,57 @@ def analyze_signal(name: str, label: str, t: np.ndarray, v: np.ndarray,
     return rep
 
 
-def supply_stats(t: np.ndarray, chans: dict, th: Thresholds, window) -> dict:
+def supply_stats(t: np.ndarray, chans: dict, th: Thresholds, window, refs=(3,), lows=(4,)) -> dict:
+    """5V reference sag over the `refs` channels and ground deviation over the `lows` channels, each the worst
+    channel, named by ref_channel / gnd_channel."""
     mask = (t >= window[0]) & (t <= window[1]) if window else np.ones(t.size, bool)
     out: dict = {"window": window}
-    if 3 in chans:
-        v = chans[3][mask]
+    for n in refs:
+        if n not in chans:
+            continue
+        v = chans[n][mask]
         v = v[np.isfinite(v)]
         if v.size:
             p1 = float(np.percentile(v, 1))
-            out.update(ref_p1=p1, ref_median=float(np.median(v)),
-                       ref_sag_mv=max(0.0, th.ref_nominal - p1) * 1000)
-    if 4 in chans:
-        v = chans[4][mask]
+            if "ref_p1" not in out or p1 < out["ref_p1"]:
+                out.update(ref_p1=p1, ref_median=float(np.median(v)),
+                           ref_sag_mv=max(0.0, th.ref_nominal - p1) * 1000, ref_channel=n)
+    for n in lows:
+        if n not in chans:
+            continue
+        v = chans[n][mask]
         v = v[np.isfinite(v)]
         if v.size:
             p99 = float(np.percentile(np.abs(v), 99))
-            out.update(gnd_p99=p99, gnd_dev_mv=p99 * 1000)
+            if "gnd_p99" not in out or p99 > out["gnd_p99"]:
+                out.update(gnd_p99=p99, gnd_dev_mv=p99 * 1000, gnd_channel=n)
+    return out
+
+
+def basic_stats(t: np.ndarray, v: np.ndarray) -> dict:
+    """Plain numbers for a channel no check applies to: levels, and pulses counted with a Schmitt trigger at
+    30% / 70% of its 1st-99th percentile span. A pulse is the *active* state, the one the line spends less time
+    in: high for an ignition command, low for a low-side injector driver. Pulses cut off by the record's ends are
+    not counted."""
+    ok = np.isfinite(v)
+    if not ok.any():
+        return {"min": None, "median": None, "max": None, "pulses": 0, "pulse_width_ms_median": None}
+    x = v[ok]
+    p1, p99 = float(np.percentile(x, 1)), float(np.percentile(x, 99))
+    out = {"min": float(x.min()), "median": float(np.median(x)), "max": float(x.max()), "pulses": 0,
+           "pulse_width_ms_median": None}
+    span = p99 - p1
+    if span < 0.2:                                    # flat: no pulses worth counting
+        return out
+    tt, s = t[ok], schmitt(x, p1 + 0.3 * span, p1 + 0.7 * span)
+    active = not (s.mean() > 0.5)                     # the minority state is the pulse
+    on = s if active else ~s
+    starts = np.flatnonzero(~on[:-1] & on[1:]) + 1
+    ends = np.flatnonzero(on[:-1] & ~on[1:]) + 1
+    widths = [tt[ends[j]] - tt[st] for st in starts for j in [np.searchsorted(ends, st)] if j < len(ends)]
+    out["pulses"] = len(widths)
+    if widths:
+        out["pulse_width_ms_median"] = float(np.median(widths) * 1000)
     return out
 
 
@@ -164,8 +202,9 @@ def compare_edges(a: SignalReport, b: SignalReport) -> dict | None:
                 delay_worst_us=float(np.abs(dly).max() * 1e6))
 
 
-def correlate_events(t, chans, events, th: Thresholds, limit=500) -> list:
-    if not events or (3 not in chans and 4 not in chans):
+def correlate_events(t, chans, events, th: Thresholds, limit=500, ref: int | None = 3,
+                     gnd: int | None = 4) -> list:
+    if not events or (ref not in chans and gnd not in chans):
         return []
     dt = float(np.median(np.diff(t[:1000])))
     w = max(1, int(th.event_window_s / dt))
@@ -173,11 +212,11 @@ def correlate_events(t, chans, events, th: Thresholds, limit=500) -> list:
     for te, kind in events[:limit]:
         i = int(np.searchsorted(t, te))
         row = dict(t=te, kind=kind, ref_dev_mv=0.0, gnd_dev_mv=0.0)
-        if 3 in chans:
-            seg = chans[3][max(0, i - w):i + w + 1] - th.ref_nominal
+        if ref in chans:
+            seg = chans[ref][max(0, i - w):i + w + 1] - th.ref_nominal
             row["ref_dev_mv"] = float(seg[np.argmax(np.abs(seg))] * 1000)
-        if 4 in chans:
-            seg = chans[4][max(0, i - w):i + w + 1]
+        if gnd in chans:
+            seg = chans[gnd][max(0, i - w):i + w + 1]
             row["gnd_dev_mv"] = float(seg[np.argmax(np.abs(seg))] * 1000)
         row["aligned"] = bool(abs(row["ref_dev_mv"]) > 0.5 * th.ref_sag_mv
                               or abs(row["gnd_dev_mv"]) > 0.5 * th.ground_mv)
@@ -185,17 +224,23 @@ def correlate_events(t, chans, events, th: Thresholds, limit=500) -> list:
     return out
 
 
-def build_findings(reports, supply, cmp, corr, th: Thresholds) -> list:
+def build_findings(reports, supply, cmp, corr, th: Thresholds, crank: list | None = None,
+                   pair: tuple | None = None, names: dict | None = None) -> list:
+    """`crank`: the crank-signal report keys; `pair`: (ECM key, sensor key) for the two-point comparison;
+    `names`: {"ref": label, "gnd": label, "rel": label} for titles. Defaults are the legacy layout."""
+    crank = crank if crank is not None else [k for k in ("ch1", "ch2") if k in reports]
+    pair = pair if pair is not None else ("ch1", "ch2")
+    names = {"ref": "5V reference", "gnd": "PCM low reference", "rel": "CH1 - CH4", **(names or {})}
     F: list[Finding] = []
 
     def add(code, sev, title, detail, **ev):
         F.append(Finding(code, sev, title, detail, ev))
 
-    r1, r2 = reports.get("ch1"), reports.get("ch2")
-    live = [r for r in (r1, r2) if r is not None]
+    r1, r2 = reports.get(pair[0]), reports.get(pair[1])
+    live = [reports[k] for k in crank]
     if not live:
         add("insufficient_data", "warn", "No crank channels in this capture",
-            "Enable CH1 (crank at the PCM pin) and/or CH2 (crank at the sensor connector).")
+            "Set a channel's role to Crank signal at ECM or Crank signal at sensor.")
         return F
 
     usable = [r for r in live if r.usable]
@@ -214,7 +259,7 @@ def build_findings(reports, supply, cmp, corr, th: Thresholds) -> list:
             f"{names}: fewer than {th.min_edges} clean rising edges. With the sensor wiring "
             f"verified, check the sensor's 5V reference, its ground, and whether the "
             f"reluctor is turning.", edges={r.name: r.n_edges for r in live})
-    elif len(live) == 2 and r1.usable != r2.usable:
+    elif r1 is not None and r2 is not None and r1.usable != r2.usable:
         dead = r1 if not r1.usable else r2
         add("harness_mismatch", "fail",
             f"{dead.label} has no usable signal but the other crank channel does",
@@ -229,14 +274,14 @@ def build_findings(reports, supply, cmp, corr, th: Thresholds) -> list:
 
     if ref_sag:
         add("ref_sag", "fail" if anomalous or not usable else "warn",
-            f"5V reference sags {supply['ref_sag_mv']:.0f} mV during cranking",
+            f"{names['ref']} sags {supply['ref_sag_mv']:.0f} mV during cranking",
             f"Lowest 5V ref (1st percentile) is {supply['ref_p1']:.2f} V." + align_txt,
             ref_sag_mv=supply["ref_sag_mv"])
     if gnd_lift:
         add("ground_lift", "fail" if anomalous or not usable else "warn",
-            f"PCM low reference deviates {supply['gnd_dev_mv']:.0f} mV from battery negative",
+            f"{names['gnd']} deviates {supply['gnd_dev_mv']:.0f} mV from battery negative",
             "The PCM's ground lifts relative to the battery during cranking, so the signal it "
-            "sees (CH1 - CH4) is shifted." + align_txt, gnd_dev_mv=supply["gnd_dev_mv"])
+            f"sees ({names['rel']}) is shifted." + align_txt, gnd_dev_mv=supply["gnd_dev_mv"])
     if usable and any_anomaly and not (ref_sag or gnd_lift):
         worst = max(usable, key=lambda r: r.anomalies)
         add("unexplained_dropouts", "fail" if anomalous else "warn",
@@ -260,21 +305,38 @@ def build_findings(reports, supply, cmp, corr, th: Thresholds) -> list:
 def analyze_capture(data: CaptureData, th: Thresholds | None = None) -> Analysis:
     th = th or Thresholds()
     t, ch = data.t, data.channels
+    roles = roles_of(data)
+    kind = {n: ROLES[r].kind for n, (r, _) in roles.items()}
+    first = lambda key: next((n for n in sorted(roles) if roles[n][0] == key), None)
+    label = lambda n: data.labels.get(n, f"CH{n}")
+    crank_ch = [n for n in sorted(ch) if kind[n] == "crank"]
     reports: dict[str, SignalReport] = {}
-    for n in (1, 2):
-        if n in ch:
-            reports[f"ch{n}"] = analyze_signal(f"ch{n}", data.labels.get(n, f"CH{n}"), t, ch[n], th)
-    if 1 in ch and 4 in ch:
-        reports["ch1_rel"] = analyze_signal("ch1_rel", "Crank as PCM sees it (CH1-CH4)",
-                                            t, ch[1] - ch[4], th)
-    live = [reports[k].edges for k in ("ch1", "ch2") if k in reports and reports[k].usable]
+    for n in crank_ch:
+        reports[f"ch{n}"] = analyze_signal(f"ch{n}", label(n), t, ch[n], th)
+    ecm, sen, low = first("crank_ecm"), first("crank_sensor"), first("crank_low")
+    rel = f"CH{ecm} - CH{low}" if ecm and low else "the crank signal against the ECM's ground"
+    if ecm and low:
+        reports["ecm_rel"] = analyze_signal("ecm_rel", f"Crank as the ECM sees it (CH{ecm}-CH{low})",
+                                            t, ch[ecm] - ch[low], th)
+    live = [reports[f"ch{n}"].edges for n in crank_ch if reports[f"ch{n}"].usable]
     window = (min(e[0] for e in live), max(e[-1] for e in live)) if live else None
-    supply = supply_stats(t, ch, th, window)
-    cmp = (compare_edges(reports["ch1"], reports["ch2"])
-           if "ch1" in reports and "ch2" in reports else None)
+    supply = supply_stats(t, ch, th, window, refs=[n for n in sorted(ch) if kind[n] == "ref"],
+                          lows=[n for n in sorted(ch) if kind[n] == "low"])
+    pair = (f"ch{ecm}", f"ch{sen}") if ecm and sen else ("", "")
+    cmp = compare_edges(reports[pair[0]], reports[pair[1]]) if ecm and sen else None
     events = sorted(e for r in reports.values() for e in r.events)
-    corr = correlate_events(t, ch, events, th)
-    findings = build_findings(reports, supply, cmp, corr, th)
+    corr = correlate_events(t, ch, events, th, ref=supply.get("ref_channel"), gnd=supply.get("gnd_channel"))
+    names = {"rel": rel}
+    refs_n = sum(k == "ref" for k in kind.values())
+    lows_n = sum(k == "low" for k in kind.values())
+    # name the role only when it is not the classic crank reference / ground, or there was a choice of channels
+    if "ref_channel" in supply and (refs_n > 1 or roles[supply["ref_channel"]][0] != "crank_ref"):
+        names["ref"] = role_label(*roles[supply["ref_channel"]])
+    if "gnd_channel" in supply and (lows_n > 1 or roles[supply["gnd_channel"]][0] != "crank_low"):
+        names["gnd"] = role_label(*roles[supply["gnd_channel"]])
+    findings = build_findings(reports, supply, cmp, corr, th, crank=[f"ch{n}" for n in crank_ch],
+                              pair=pair, names=names)
+    basic = {f"ch{n}": basic_stats(t, ch[n]) for n in sorted(ch) if kind[n] == "basic"}
     bad = {n: int((~np.isfinite(v)).sum()) for n, v in ch.items() if not np.isfinite(v).all()}
     if bad:
         findings = [f for f in findings if f.code != "signal_clean"]
@@ -283,4 +345,4 @@ def analyze_capture(data: CaptureData, th: Thresholds | None = None) -> Analysis
             "bad_samples", "warn", "Capture contains invalid (NaN) samples",
             f"Non-finite samples: {names}. Statistics skip them, but a bad download can hide "
             f"real problems; re-capture before trusting a clean result.", {"counts": bad}))
-    return Analysis(reports, supply, cmp, corr, findings)
+    return Analysis(reports, supply, cmp, corr, findings, roles, basic)

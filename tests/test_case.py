@@ -328,3 +328,17 @@ def test_event_source_must_be_text():
 def test_set_hypothesis_records_the_source(case):
     ev = case.set_hypothesis(None, "Bad PCM", source="mcp")
     assert ev.source == "mcp" and case.hypotheses()["h1"].source == "mcp"
+
+
+def test_snapshot_uses_the_crank_at_ecm_channel_wherever_it_is():
+    from crank.analysis import analyze_capture
+    from crank.case import capture_snapshot
+    from crank.sim import generate
+    d = generate("healthy")
+    d.channels[3] = d.channels[1].copy()
+    d.channels[1] = d.channels[1] * 0
+    d.channels[2] = d.channels[2] * 0
+    d.meta["roles"] = {"1": {"role": "other", "num": None}, "2": {"role": "crank_sensor", "num": None},
+                       "3": {"role": "crank_ecm", "num": None}, "4": {"role": "crank_low", "num": None}}
+    snap = capture_snapshot(analyze_capture(d))
+    assert snap["edges"] > 100 and snap["rpm"]

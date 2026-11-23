@@ -818,3 +818,66 @@ def test_watches_page_lists_and_charts_a_saved_watch(at):
 def test_watches_page_with_no_watches_is_friendly(at):
     _go(at, "Watches")
     assert any("No OBD watches" in i.value for i in at.info)
+
+
+def test_capture_page_channel_table_has_roles(at):
+    _go(at, "Capture")
+    rows = at.dataframe[0].value.to_dict("records")             # the channel data_editor, as the harness sees it
+    assert [r["role"] for r in rows] == ["Crank signal at ECM", "Crank signal at sensor", "Crank 5V reference",
+                                         "Crank low reference"]
+    assert [c.role for c in get_controller().settings.channels] == ["crank_ecm", "crank_sensor", "crank_ref",
+                                                                    "crank_low"]
+
+
+def test_results_roles_editor_saves_and_logs_a_reanalysis(at):
+    _arm_and_finish(at)
+    _go(at, "Results")
+    cid = get_controller().store.open(get_controller().session_name).list_captures()[-1]["id"]
+    _role_box(at, 2).set_value("Cam signal")
+    _role_box(at, 3).set_value("Ignition control (EST)").run()
+    _role_num(at, 3).set_value(1)
+    at.button(key="save_roles").click().run()
+    assert not at.exception
+    texts = [e.text for e in _case().events() if e.type == "observation"]
+    assert any("re-analysed with corrected roles" in t and "CH2: Cam signal" in t and "CH3: Ignition control (EST) 1"
+               in t for t in texts)
+    got = get_controller().store.open(get_controller().session_name).load_capture(cid)
+    assert got.meta["roles_source"] == "corrected" and got.meta["roles"]["2"]["role"] == "cam"
+    assert not any("harness" in m.value.lower() for m in at.markdown)   # re-analysed verdict shown, no mismatch
+
+
+def _role_box(at, n):
+    return next(w for w in at.selectbox if (w.key or "").startswith(f"role_{n}_"))
+
+
+def _role_num(at, n):
+    return next(w for w in at.number_input if (w.key or "").startswith(f"num_{n}_"))
+
+
+def test_results_roles_editor_shows_roles_changed_elsewhere_and_keeps_them(at):
+    _arm_and_finish(at)
+    _go(at, "Results")
+    ctrl = get_controller()
+    ses = ctrl.store.open(ctrl.session_name)
+    cid = ses.list_captures()[-1]["id"]
+    ses.set_capture_roles(cid, {2: ("cam", None)})            # e.g. the AI corrected it over MCP
+    at.run()
+    assert _role_box(at, 2).value == "Cam signal"
+    _role_box(at, 4).set_value("ECM ground")
+    at.button(key="save_roles").click().run()
+    got = ses.load_capture(cid)
+    assert got.meta["roles"]["2"]["role"] == "cam" and got.meta["roles"]["4"]["role"] == "ecm_ground"
+
+
+def test_results_page_survives_an_unknown_saved_role(at):
+    _arm_and_finish(at)
+    ctrl = get_controller()
+    ses = ctrl.store.open(ctrl.session_name)
+    cid = ses.list_captures()[-1]["id"]
+    import json
+    p = ses.path / "captures" / f"{cid}.json"
+    meta = json.loads(p.read_text())
+    meta["roles"] = {"1": {"role": "crank_ecm", "num": None}, "2": {"role": "bogus"}}
+    p.write_text(json.dumps(meta))
+    _go(at, "Results")
+    assert not at.exception and _role_box(at, 2).value == "Other"

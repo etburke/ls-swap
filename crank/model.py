@@ -15,14 +15,16 @@ class ChannelConfig:
     scale: float            # V/div
     offset: float = 0.0     # V
     enabled: bool = True
+    role: str = "other"     # crank.roles key: what the probe is on
+    num: int | None = None  # cylinder / circuit number for numbered roles
 
 
 def default_channels() -> list[ChannelConfig]:
     return [
-        ChannelConfig(1, "Crank @ PCM", 2.0, 0.0),
-        ChannelConfig(2, "Crank @ sensor", 2.0, 0.0),
-        ChannelConfig(3, "5V ref @ sensor", 0.5, -5.0),
-        ChannelConfig(4, "PCM low ref vs batt -", 0.2, 0.0),
+        ChannelConfig(1, "Crank @ PCM", 2.0, 0.0, role="crank_ecm"),
+        ChannelConfig(2, "Crank @ sensor", 2.0, 0.0, role="crank_sensor"),
+        ChannelConfig(3, "5V ref @ sensor", 0.5, -5.0, role="crank_ref"),
+        ChannelConfig(4, "PCM low ref vs batt -", 0.2, 0.0, role="crank_low"),
     ]
 
 

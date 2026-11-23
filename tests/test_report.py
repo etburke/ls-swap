@@ -62,3 +62,31 @@ def test_figures_build_for_full_and_zoomed_window_with_many_events():
     assert len(build_figure(d, a).data) >= 5
     assert len(build_figure(d, a, 0.0, 0.05).data) >= 5
     assert len(build_overlay(d, generate("healthy"), 1).data) == 2
+
+
+def test_figure_rows_follow_roles():
+    from crank.analysis import analyze_capture
+    from crank.report import build_figure
+    from crank.sim import generate
+    d = generate("healthy")
+    d.meta["roles"] = {"1": {"role": "crank_ecm", "num": None}, "2": {"role": "cam", "num": None},
+                       "3": {"role": "est", "num": 1}, "4": {"role": "injector", "num": 1}}
+    titles = [a.text for a in build_figure(d, analyze_capture(d)).layout.annotations]
+    assert not any("ECM sees" in t or "CH1-CH4" in t for t in titles)
+    assert any("Cam signal" in t for t in titles) and any("Ignition control (EST) 1" in t for t in titles)
+
+
+def test_figure_keeps_the_ecm_relative_row_for_the_classic_layout():
+    from crank.analysis import analyze_capture
+    from crank.report import build_figure
+    from crank.sim import generate
+    d = generate("ground_lift")
+    titles = [a.text for a in build_figure(d, analyze_capture(d)).layout.annotations]
+    assert any("Crank as the ECM sees it (CH1-CH4)" in t for t in titles) and len(titles) == 5
+
+
+def test_legacy_figure_marks_events_on_supply_rows_too():
+    d = generate("ref_sag")
+    fig = build_figure(d, analyze_capture(d))
+    markers = [tr for tr in fig.data if tr.line and tr.line.color == "rgba(220,0,0,0.35)"]
+    assert len(markers) == 5                                   # 4 channels + the ECM-relative row, as before roles

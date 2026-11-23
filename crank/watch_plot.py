@@ -11,10 +11,13 @@ SCOPE_RPM = "Scope CH1 (per rev)"
 
 def _scope_rpm(meta: dict, capture: CaptureData | None, th: Thresholds | None) -> list[tuple[float, float]]:
     """The capture's per-revolution crank RPM on the watch's clock, or [] when it cannot be placed or has none."""
-    if capture is None or 1 not in capture.channels or not meta.get("trigger_t") or not meta.get("started"):
+    if capture is None or not meta.get("trigger_t") or not meta.get("started"):
         return []
-    rep = analyze_capture(capture, th).reports.get("ch1")
-    if rep is None or not rep.rev_rpm:
+    a = analyze_capture(capture, th)
+    crank = [n for n in sorted(a.roles) if a.roles[n][0] == "crank_ecm"] + \
+            [n for n in sorted(a.roles) if a.roles[n][0] == "crank_sensor"]
+    rep = next((a.reports[f"ch{n}"] for n in crank if a.reports.get(f"ch{n}") and a.reports[f"ch{n}"].rev_rpm), None)
+    if rep is None:
         return []
     shift = meta["trigger_t"] - meta["started"]
     return [(t + shift, r) for t, r in rep.rev_rpm]

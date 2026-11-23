@@ -15,6 +15,7 @@ EXPECTED_TOOLS = {
     "reanalyze_capture", "arm_capture", "cancel_capture", "obd_connect", "obd_disconnect", "obd_relink",
     "obd_read", "obd_stop", "obd_cancel", "add_case_note", "set_suspect",
     "watch_progress", "list_watches", "get_watch", "obd_watch", "obd_watch_stop", "obd_watch_cancel",
+    "set_capture_roles",
 }
 
 

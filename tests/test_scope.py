@@ -209,3 +209,18 @@ def test_channels_of_different_lengths_raise_a_clear_error():
     f.query = query
     with pytest.raises(ScopeError, match="points"):
         s.fetch(cfg)
+
+
+def test_scope_fetch_records_roles():
+    cfg = CaptureSettings()
+    cfg.channels[1].role = "cam"
+    cfg.channels[2].role, cfg.channels[2].num = "est", 2
+    d = RigolScope(inst=FakeVisa()).fetch(cfg)
+    assert d.meta["roles"]["2"] == {"role": "cam", "num": None} and d.meta["roles"]["3"] == {"role": "est", "num": 2}
+
+
+def test_sim_scope_fetch_records_roles():
+    cfg = CaptureSettings()
+    cfg.channels[3].role = "ecm_ground"
+    d = SimScope("healthy").fetch(cfg)
+    assert d.meta["roles"]["4"] == {"role": "ecm_ground", "num": None}

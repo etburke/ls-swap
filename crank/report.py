@@ -7,6 +7,7 @@ import numpy as np
 
 from .analysis import Analysis
 from .model import CaptureData
+from .roles import ROLES, role_label, roles_of
 
 SEVERITY_ORDER = {"fail": 0, "warn": 1, "info": 2}
 
@@ -67,17 +68,23 @@ def build_figure(data: CaptureData, a: Analysis, x0: float | None = None,
     x0 = t[0] if x0 is None else x0
     x1 = t[-1] if x1 is None else x1
     m = (t >= x0) & (t <= x1)
-    rows = [(data.labels.get(n, f"CH{n}"), data.channels[n]) for n in sorted(data.channels)]
-    if 1 in data.channels and 4 in data.channels:
-        rows.append(("Crank as PCM sees it (CH1-CH4)", data.channels[1] - data.channels[4]))
+    roles = a.roles or roles_of(data)
+    rows = [(f"CH{n} · {data.labels.get(n, f'CH{n}')} · {role_label(*roles.get(n, ('other', None)))}",
+             data.channels[n], ROLES[roles.get(n, ("other", None))[0]].kind != "basic")
+            for n in sorted(data.channels)]
+    rel = a.reports.get("ecm_rel")
+    if rel is not None:
+        ecm = next(n for n in sorted(roles) if roles[n][0] == "crank_ecm")
+        low = next(n for n in sorted(roles) if roles[n][0] == "crank_low")
+        rows.append((rel.label, data.channels[ecm] - data.channels[low], True))
     fig = make_subplots(rows=len(rows), cols=1, shared_xaxes=True, vertical_spacing=0.03,
                         subplot_titles=[r[0] for r in rows])
     ev = [e[0] for e in a.events if x0 <= e[0] <= x1][:max_events]
-    for k, (name, v) in enumerate(rows, start=1):
+    for k, (name, v, crank) in enumerate(rows, start=1):
         td, vd = decimate(t[m], v[m])
         fig.add_trace(go.Scatter(x=td, y=vd, mode="lines", name=name, line=dict(width=1),
                                  showlegend=False), row=k, col=1)
-        if ev and len(vd):
+        if crank and ev and len(vd):
             lo, hi = float(np.nanmin(vd)), float(np.nanmax(vd))
             xs = np.repeat(ev, 3).astype(float)
             xs[2::3] = np.nan
