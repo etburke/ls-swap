@@ -154,11 +154,14 @@ class Scenario:
     no_answer_pids: tuple = ()                          # requests that draw NO DATA though the map lists them
     fault: str | None = None                           # silent | no_adapter | no_vehicle | garbage | drop_after:N
     monitor: str = "running"                           # ATMA output: running | crank_rpm | crank_no_rpm | overflow | reset
+    multi_pid: bool = True                             # False: a mode 01 request for several PIDs draws 7F 01 12
 
 
 LIVE_RUNNING = {0x0C: bytes([0x0B, 0xB8]), 0x42: bytes([0x36, 0xB0]), 0x05: bytes([0x82]), 0x0D: bytes([0]),
                 0x04: bytes([0x40]), 0x06: bytes([0x80]), 0x07: bytes([0x84]), 0x11: bytes([0x30]),
-                0x0F: bytes([0x4B]), 0x0B: bytes([0x23])}
+                0x0F: bytes([0x4B]), 0x0B: bytes([0x23]), 0x0E: bytes([0x8C]), 0x33: bytes([0x65]),
+                0x45: bytes([0x10]), 0x47: bytes([0x2A]), 0x49: bytes([0x25]), 0x4A: bytes([0x12]),
+                0x4C: bytes([0x10])}
 LIVE_CRANKING = {**LIVE_RUNNING, 0x0C: bytes([0, 0]), 0x42: bytes([0x2E, 0xE0])}
 
 SCENARIOS = {
@@ -206,6 +209,8 @@ SCENARIOS = {
     "garbage": Scenario(fault="garbage"),
     "drops_mid_read": Scenario(values=LIVE_RUNNING, fault="drop_after:12"),
     "cranking_rpm_seen": Scenario(values=LIVE_CRANKING, monitor="crank_rpm"),
+    "crank_poll_multi": Scenario(values=LIVE_RUNNING, monitor="crank_rpm"),
+    "no_multi_pid": Scenario(values=LIVE_RUNNING, monitor="crank_rpm", multi_pid=False),
     "cranking_no_rpm": Scenario(values=LIVE_CRANKING, monitor="crank_no_rpm"),
     "monitor_overflow": Scenario(values=LIVE_RUNNING, monitor="overflow"),
     "reset_mid_watch": Scenario(values=LIVE_RUNNING, monitor="reset"),
@@ -371,7 +376,10 @@ class SimTransport(Transport):
         sc = self.sc
         mode, rest = int(cmd[:2], 16), cmd[2:]
         pid = int(rest[:2], 16) if rest else None
-        body = self._pcm_body(mode, pid)
+        if mode == 0x01 and len(rest) > 2:
+            body = self._multi_body([int(rest[i:i + 2], 16) for i in range(0, len(rest), 2)])
+        else:
+            body = self._pcm_body(mode, pid)
         if body == "?":
             return "?"
         if cmd in sc.no_answer_pids:
@@ -407,6 +415,17 @@ class SimTransport(Transport):
         if not codes:
             return None
         return bytes([mode + 0x40, len(codes)]) + b"".join(_dtc_bytes(c) for c in codes)
+
+    def _multi_body(self, pids: list[int]) -> bytes | None:
+        """A multi-PID mode 01 reply: 41 then (pid, data) for each supported PID asked; None if none are."""
+        if not self.sc.multi_pid:
+            return bytes([0x7F, 0x01, 0x12])
+        out = bytearray([0x41])
+        for p in pids:
+            one = self._pcm_body(0x01, p)
+            if isinstance(one, bytes) and one[0] == 0x41:
+                out += one[1:]
+        return bytes(out) if len(out) > 1 else None
 
     def _pcm_body(self, mode: int, pid: int | None):
         """The PCM's message for this request: bytes, None for NO DATA, or '?' for an unknown mode."""
