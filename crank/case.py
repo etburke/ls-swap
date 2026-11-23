@@ -329,3 +329,17 @@ def suggest_hypotheses(codes, existing_titles=()) -> list[str]:
         if s and s.lower() not in have and s not in out:
             out.append(s)
     return out
+
+
+def correct_capture_roles(session: Session, capture_id: str, changes: dict, thresholds=None, source: str = ""):
+    """Set corrected roles ({channel: (role, num)}) on a saved capture, re-analyse it, and add an observation
+    saying so (the capture's original verdict entry stays). Returns (analysis, event). ValueError for a bad
+    channel or role."""
+    from .analysis import analyze_capture
+    from .roles import role_label
+    session.set_capture_roles(capture_id, changes)
+    a = analyze_capture(session.load_capture(capture_id), thresholds)
+    what = "; ".join(f"CH{int(n)}: {role_label(*a.roles[int(n)])}" for n in sorted(changes, key=int))
+    ev = Case(session).append("observation", f"Capture {capture_id} re-analysed with corrected roles ({what}): "
+                              + "; ".join(f.title for f in a.findings), {}, {"capture": capture_id}, source=source)
+    return a, ev

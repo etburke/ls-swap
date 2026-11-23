@@ -7,7 +7,7 @@ import streamlit as st
 
 from crank.analysis import analyze_capture
 from crank.capture import CaptureJob
-from crank.case import Case
+from crank.case import Case, correct_capture_roles
 from crank.controller import get_controller, lan_ip
 from crank.mcp_server import ensure_mcp_server
 from crank.model import CaptureSettings, ChannelConfig, Thresholds
@@ -322,14 +322,10 @@ def roles_editor(sess, cid: str) -> None:
                 st.info("The roles are unchanged.")
                 return
             try:
-                sess.set_capture_roles(cid, changed)
+                correct_capture_roles(sess, cid, changed, ss.thresholds)
             except ValueError as e:
                 st.error(str(e))
                 return
-            a = analyze_capture(sess.load_capture(cid), ss.thresholds)
-            what = "; ".join(f"CH{n}: {role_label(*r)}" for n, r in sorted(changed.items()))
-            Case(sess).append("observation", f"Capture {cid} re-analysed with corrected roles ({what}): "
-                              + "; ".join(f.title for f in a.findings), {}, {"capture": cid})
             st.success("Roles saved; the capture was re-analysed and the case notes it. "
                        "The original verdict stays in the timeline.")
 

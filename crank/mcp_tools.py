@@ -12,10 +12,11 @@ import numpy as np
 from mcp.server.mcpserver.exceptions import ToolError
 
 from .analysis import Analysis, analyze_capture
-from .case import Case, capture_snapshot
+from .case import Case, capture_snapshot, correct_capture_roles
 from .model import Thresholds
 from .obd.errors import ObdError
 from .obd.series import pid_series, watch_pids
+from .roles import parse_role
 from .obd.trafficlog import tail_lines
 from .obd.transport import SCENARIOS as OBD_SCENARIOS
 from .render import to_html, to_markdown
@@ -64,6 +65,8 @@ def analysis_dict(a: Analysis, event_limit: int = EVENT_LIMIT) -> dict:
         "signals": {k: {f: getattr(r, f) for f in _REPORT_FIELDS} for k, r in a.reports.items()},
         "events": [{"t": t, "kind": kind} for t, kind in events[:event_limit]],
         "events_total": len(events),
+        "roles": {str(n): (k if num is None else f"{k}:{num}") for n, (k, num) in sorted(a.roles.items())},
+        "basic": a.basic,
     })
 
 
@@ -285,6 +288,7 @@ class Tools:
                             "sim": bool(meta.get("sim")), "note": meta.get("note", "")},
                 "thresholds": jsonable(dataclasses.asdict(self.ctrl.thresholds)),
                 "recorded_verdict": jsonable(self._recorded(Case(sess), capture_id)),
+                "roles_source": data.meta.get("roles_source", "legacy"),
                 **analysis_dict(analyze_capture(data, self.ctrl.thresholds))}
 
     def get_capture_signal(self, capture_id: str, channel: int, start: float | None = None,
@@ -485,6 +489,24 @@ class Tools:
         self._gate()
         self.ctrl.cancel_obd()
         return jsonable(self._obd_state())
+
+    def set_capture_roles(self, capture_id: str, roles: dict[str, str], session: str | None = None) -> dict[str, Any]:
+        """Correct what a saved capture's channels were connected to, then re-analyse it. `roles` maps channel
+        numbers to roles, e.g. {"2": "cam", "3": "est:1", "4": "injector:1"}. Roles: crank_ecm, crank_sensor,
+        crank_ref, crank_low, cam, cam_ref, cam_low, est:N, coil_low:1|2 (odd/even bank), injector:N, ecm_ground,
+        ecm_ign, ecm_batt, tp:N, tac:N, app:N, map, fuel_pump_relay, starter_relay, other. The scope data is never
+        changed; the correction is stored beside it. The capture's original verdict stays in the case and an
+        AI-authored observation records the re-analysis. Needs "Allow AI control"."""
+        self._gate()
+        sess = self._session(session)
+        self._load(sess, capture_id)
+        try:
+            changes = {int(n): parse_role(r) for n, r in roles.items()}
+            a, _ = correct_capture_roles(sess, capture_id, changes, self.ctrl.thresholds, source="mcp")
+        except ValueError as e:
+            raise ToolError(str(e)) from e
+        d = analysis_dict(a)
+        return {"capture": capture_id, "session": sess.name, "roles": d["roles"], "findings": d["findings"]}
 
     # -- case writes (need Allow AI control; additions only, marked as AI-authored)
     def add_case_note(self, type: str, text: str) -> dict[str, Any]:
