@@ -82,8 +82,11 @@ def _quick_add(case, capture_ids):
 
 
 def pick_obd_source(key: str):
-    """Simulator or real adapter. Returns a Controller.read_obd source, or None if no adapter port."""
-    mode = st.radio("Source", ["Simulator", "Real adapter"], key=f"{key}_mode", horizontal=True)
+    """Simulator, real adapter or off. Returns a Controller.read_obd source, or None if off or no adapter port."""
+    mode = st.radio("Source", ["Simulator", "Real adapter", "Off"], key=f"{key}_mode", horizontal=True)
+    if mode == "Off":
+        st.caption("OBD off.")
+        return None
     if mode == "Simulator":
         return st.selectbox("Simulated vehicle", list(SCENARIOS), key=f"{key}_scenario")
     from crank.obd.serial_transport import list_ports

@@ -133,10 +133,12 @@ with st.container(border=True):
 # ------------------------------------------------------------------ sidebar
 with st.sidebar:
     st.title("Crank Test Harness")
-    mode = st.radio("Scope", ["Simulator", "Real scope"], key="mode")
+    mode = st.radio("Scope", ["Simulator", "Real scope", "Off"], key="mode")
     job_busy = bool(ss.job and ss.job.running)
     if mode == "Simulator":
         st.selectbox("Scenario", SCENARIOS, key="scenario")
+    elif mode == "Off":
+        st.caption("Scope off: no captures. OBD reads and watches still work.")
     else:
         st.text_input("VISA resource (blank = auto-detect)", key="resource")
         if st.button("Connect", key="connect", disabled=job_busy):
@@ -209,15 +211,19 @@ def page_capture():
     label = st.text_input("Capture label (what changed?)", key="cap_label")
     note = st.text_input("Note", key="cap_note")
 
-    watch = st.checkbox("Watch OBD during capture", key="arm_watch", disabled=busy,
-                        help="Records the PCM on the open OBD connection, linked to this capture.")
+    scope_off = ss.mode == "Off"
+    if scope_off:
+        st.info("The scope is off. To record only OBD, use **Watch the PCM** on the Case page.")
+    obd_off = ss.get("obd_src_mode") == "Off" and ctrl.connection_status()["state"] != "connected"
+    watch = not obd_off and st.checkbox("Watch OBD during capture", key="arm_watch", disabled=busy or scope_off,
+                                        help="Records the PCM on the open OBD connection, linked to this capture.")
     watch_mode = "raw"
     if watch:
         from case_ui import WATCH_MODES
         watch_mode = WATCH_MODES[st.selectbox("Watch mode", list(WATCH_MODES), key="arm_watch_mode",
                                               disabled=busy)]
 
-    if st.button("Arm", key="arm", type="primary", disabled=busy):
+    if st.button("Arm", key="arm", type="primary", disabled=busy or scope_off):
         err = ctrl.arm(label, note, watch=watch, watch_mode=watch_mode)
         if err:
             st.error(err)

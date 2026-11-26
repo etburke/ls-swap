@@ -881,3 +881,20 @@ def test_results_page_survives_an_unknown_saved_role(at):
     p.write_text(json.dumps(meta))
     _go(at, "Results")
     assert not at.exception and _role_box(at, 2).value == "Other"
+
+
+def test_scope_off_disables_arm(at):
+    at.sidebar.radio(key="mode").set_value("Off").run()
+    at.sidebar.radio(key="page").set_value("Capture").run()
+    assert not at.exception
+    assert at.button(key="arm").disabled
+    assert any("scope is off" in i.value for i in at.info)
+    assert get_controller().arm("x") == "The scope is off. Pick Simulator or Real scope in the sidebar to capture."
+
+
+def test_obd_off_disables_connect_and_hides_the_linked_watch(at_conn):
+    at_conn.sidebar.radio(key="obd_src_mode").set_value("Off").run()
+    assert not at_conn.exception
+    assert at_conn.sidebar.button(key="obd_connect").disabled
+    at_conn.sidebar.radio(key="page").set_value("Capture").run()
+    assert not any(c.key == "arm_watch" for c in at_conn.checkbox)

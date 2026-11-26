@@ -23,6 +23,7 @@ from .store import SessionStore
 
 SYNCABLE = ("mode", "scenario", "session_name", "settings", "thresholds")
 _SEVERITY_ORDER = {"fail": 0, "warn": 1, "info": 2}
+SCOPE_OFF = "The scope is off. Pick Simulator or Real scope in the sidebar to capture."
 LINKED_TAIL_S = 2.0           # a linked watch records this long past the end of the capture's record time
 LINKED_START_S = 25.0         # how long a capture waits for its linked watch to be recording
 
@@ -77,6 +78,8 @@ class Controller:
         with self._lock:
             if self.running:
                 return "A capture is already running."
+            if self.mode == "Off":
+                return SCOPE_OFF
             if self.mode == "Simulator":
                 scope = SimScope(self.scenario, fault=self.sim_fault)
             elif self.scope is not None:
