@@ -366,7 +366,7 @@ class Tools:
                     watch_mode: str = "raw") -> dict[str, Any]:
         """Arm the scope for one capture in the laptop's current session, mode, scenario and settings. The
         capture is labeled "[AI] ...". In real-scope mode the scope waits for the first crank edge, so tell
-        the owner to crank the engine; this tool only arms. Poll get_capture_progress for the result. With
+        the owner to crank the engine; this tool only arms. Fails while the owner has the scope set to Off. Poll get_capture_progress for the result. With
         watch=true an OBD watch (watch_mode 'raw' or 'poll', needs a connection) is linked to the capture and
         starts first; the scope is armed only once it is recording, so wait for the capture state "armed"
         before telling the owner to crank."""

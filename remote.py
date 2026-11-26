@@ -24,17 +24,23 @@ def render(ctrl):
     st.markdown(BIG_BUTTONS, unsafe_allow_html=True)
     st.title("Crank remote")
     snap = ctrl.snapshot()
-    what = snap["scenario"] if snap["mode"] == "Simulator" else "real scope"
-    st.caption(f"{snap['mode']}: {what} · session {snap['session_name']}")
+    scope_off = snap["mode"] == "Off"
+    what = {"Simulator": f"Simulator: {snap['scenario']}", "Off": "Scope off"}.get(snap["mode"], "Real scope")
+    st.caption(f"{what} · session {snap['session_name']}")
 
     from conn_ui import connection_panel
     with st.expander("OBD adapter connection"):
         connection_panel(ctrl, "remote_obd")
 
     label = st.text_input("What changed? (label)", key="remote_label")
-    watch = st.checkbox("Watch OBD during capture", key="remote_arm_watch", disabled=snap["running"])
+    if scope_off:
+        st.info("The scope is off (laptop sidebar). Use Watch OBD below to record only OBD.")
+    obd_off = (st.session_state.get("remote_obd_src_mode") == "Off"
+               and ctrl.connection_status()["state"] != "connected")
+    watch = not obd_off and st.checkbox("Watch OBD during capture", key="remote_arm_watch",
+                                        disabled=snap["running"] or scope_off)
     if st.button("ARM", key="remote_arm", type="primary", use_container_width=True,
-                 disabled=snap["running"]):
+                 disabled=snap["running"] or scope_off):
         err = ctrl.arm(label, watch=watch)
         if err:
             st.error(err)
